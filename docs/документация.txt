@@ -1,0 +1,331 @@
+Сохраняй как `~/FARM-README.md` (на сервер) и копию себе в заметки — теперь это **актуальная** версия под v5:
+
+---
+
+# 🚜 ФЕРМА — ПОЛНАЯ ДОКУМЕНТАЦИЯ v2
+
+*Клиент v0.5 · сервер v0.3 · неубиваемость v5. Обновлено после сдачи этапа 0.*
+
+---
+
+## 1. ОБЩАЯ КАРТИНА
+
+```
+Телефоны (Termux + root, Android 10)
+        │ WebSocket (исходящее соединение — телефоны сами тянутся к серверу)
+        ▼
+http://gleb2009kiler-55019.portmap.host:55019
+        │
+[portmap.io] ──► [OpenVPN туннель] ──► [Debian дома] ──► [FastAPI :8000]
+```
+
+**Принципы архитектуры:**
+
+| Правило | Смысл |
+|---|---|
+| main.py тонкий | диспетчер: связь + роутинг задач + watchdog. Ноль бизнес-логики |
+| Сервисы ≠ клиент ≠ сервер | фарм не знает про сервер, сервер не знает про фарм |
+| Один файл — один писатель | `farm_state.json` пишет фарм, клиент только читает |
+| Состояние в `info/` | атомарная запись, переживает ребуты и апдейты |
+| Любого можно убить | систему поднимет один из слоёв неубиваемости |
+| `client/` на сервере = истина | что там лежит — то и раздаётся телефонам при ⬆ |
+
+---
+
+## 2. СЕРВЕР (Debian)
+
+### Дерево
+
+```
+/home/gleb/farm-server/
+├── main.py            ← сервер. Правки → sudo systemctl restart farm-api
+├── bootstrap.py       ← установщик (раздаётся по /bootstrap.py)
+├── dashboard.html     ← панель. Правки → просто F5 в браузере, БЕЗ рестарта
+└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (10 файлов)
+    ├── main.py            ← клиент v0.5
+    ├── setup.py           ← неубиваемость v5 (универсальная)
+    ├── supervisor.sh      ← слой 3
+    ├── keeper.sh          ← root-страж v2.1 (с логом)
+    ├── farm_stop.sh       ← полная остановка
+    ├── farm_start.sh      ← запуск
+    ├── core/
+    │   ├── connection.py      ← WS + бэкофф 5→10→20→40→60с
+    │   └── process_manager.py ← сервисы: pid/desired/failing
+    └── services/
+        ├── services.json      ← манифест сервисов
+        └── demo/main.py       ← тестовый сервис
+```
+
+### Systemd
+
+| Сервис | Команды |
+|---|---|
+| `farm-api` | `sudo systemctl start/stop/restart farm-api`; логи `journalctl -u farm-api -f` |
+| `openvpn-portmap` | то же; туннель жив → `ip -brief addr \| grep tun` |
+
+Оба с автозапуском. Ручной запуск для отладки: `cd ~/farm-server && source venv/bin/activate && python main.py` (сначала `systemctl stop farm-api` — иначе порт занят).
+
+### Endpoints
+
+| URL | Что |
+|---|---|
+| `/` | дашборд |
+| `/ws` | WebSocket телефонов |
+| `/health` | жив ли сервер |
+| `/client/manifest` · `/client/file?path=` | раздача клиента + sha256 |
+| `/bootstrap.py` | установщик |
+| `/api/devices` · `/api/devices/{id}/send` · `/api/broadcast` | управление |
+| `/api/update` (`{"device_id":...}` или `{"all":true}`) | обновление |
+| `/api/results/{task_id}` | результат задачи (TTL 1 час) |
+
+**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 10 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
+
+---
+
+## 3. ТЕЛЕФОН (~/farm/)
+
+### Дерево
+
+```
+~/farm/
+├── main.py            ← клиент v0.5. Запускается ТОЛЬКО supervisor'ом
+├── config.json        ← device_id, server_url, ws_url. Апдейтом НЕ трогается
+├── setup.py           ← ставит неубиваемость (selfheal зовёт сам)
+├── supervisor.sh      ← слой 3
+├── keeper.sh          ← слой 6 (root)
+├── farm_stop.sh       ← ⛔ полная остановка
+├── farm_start.sh      ← ▶ запуск
+├── core/
+│   ├── connection.py
+│   └── process_manager.py
+├── services/          ← рабочие процессы
+│   ├── services.json
+│   └── demo/main.py
+├── info/              ← СОСТОЯНИЕ (переживает всё)
+│   ├── client.pid         ← по нему supervisor/keeper видят живость клиента
+│   ├── pids/<name>.pid    ← pid сервисов
+│   ├── services_state.json← desired: что ДОЛЖНО работать
+│   ├── setup_done.json    ← маркер неубиваемости (v:5)
+│   └── STOP               ← ЕСТЬ = полный стоп (клиент+supervisor+keeper молчат)
+└── logs/
+    ├── client.log        ← вывод main.py. Ротация: supervisor, >20МБ → хвост 3000 строк
+    ├── supervisor.log    ← события supervisor. Ротации НЕТ
+    └── services/*.log    ← вывод сервисов. Ротации НЕТ
+```
+
+### Системные пути (вне ~/farm)
+
+| Путь | Что |
+|---|---|
+| `~/.bashrc` | хук FARM-AUTO: открыл шелл → нет supervisor → поднять |
+| `~/.termux/boot/farm.sh` | скрипт Termux:Boot (wake-lock + supervisor) |
+| `~/.termux/termux.properties` | allow-external-apps |
+| `/data/local/tmp/farm-keeper.log` | 🔍 лог root-стража — главный инструмент диагностики |
+| `/data/local/tmp/.farm_keeper.pid` | pid стража |
+| `/data/local/tmp/.farm_stop` | второй STOP-файл — читается стражем даже при зашифрованном Termux |
+| `/data/local/tmp/.farm_supervisor.lock` | защита от дублей supervisor |
+
+---
+
+## 4. НЕУБИВАЕМОСТЬ (v5) — как реально работает
+
+### Слои
+
+```
+Слой 6: keeper.sh (root-страж) — запускается при загрузке init.rc или service.d
+        Лог: /data/local/tmp/farm-keeper.log. FBE-ожидание, фоллбеки
+Слой 5: Termux:Boot → ~/.termux/boot/farm.sh
+Слой 4: хук ~/.bashrc
+Слой 3: supervisor.sh — python в foreground, умер → рестарт через 60с
+Слой 2: main.py — WS-реконнекты
+Слой 1: watchdog в main.py — сервисы, каждые 10с
++ selfheal в main.py — маркер≠v5 или supervisor мёртв → сам прогоняет setup.py
++ STOP-файлы: ~/farm/info/STOP + /data/local/tmp/.farm_stop
+```
+
+### ДИАГНОЗ ЭТОГО ТЕЛЕФОНА (важно! запомнить)
+
+| Проверка | Результат | Следствие |
+|---|---|---|
+| root | ✅ «голый» su в прошивке | su работает, но… |
+| Magisk/KernelSU/APatch | ❌ нет (`/data/adb/` пустая) | service.d не исполняется никем |
+| SELinux | Disabled | seclabel не нужен (и не проверить) |
+| `/system` | ❌ RO, dm-verity | init.rc установить НЕЛЬЗЯ |
+
+**→ Единственный автозапуск после ребута: Termux:Boot.** setup.py сам скачивает и ставит APK через `pm install` (нужен лишь один раз открыть приложение руками).
+
+**Что setup.py v5 пробует по порядку** (на новых телефонах сам выберет рабочее): init.rc в /system (если RW) → service.d (если есть менеджер) → Termux:Boot (всегда) → bashrc (всегда).
+
+### Поведение по сценариям
+
+| Сценарий | Кто спасает |
+|---|---|
+| Клиент упал | supervisor (слой 3), ≤60с |
+| Сервис (farm/demo) упал | watchdog (слой 1), ≤10с |
+| Termux убит системой (до ребута) | keeper: pidof → am start → bashrc |
+| **Ребут телефона** | Termux:Boot → farm.sh → supervisor → клиент → сервисы по desired |
+| Ребут → потом force-stop Termux | ⚠️ keeper после ребута НЕ поднят — см. «Ограничения» |
+| Сломанный апдейт (клиент умирает мгновенно) | supervisor: рестарты с паузой 60с (клиент.log ротация), не зациклит |
+
+### Ключевые механизмы
+
+- **Живость клиента** = pid в `info/client.pid` + проверка cmdline «farm/main.py» (не скан по имени — иначе ловил бы `services/farm/main.py`)
+- **desired state**: `service.start farm` → desired=running → после ребута main сам поднимет фарм
+- **failing**: 5 рестартов сервиса за 3 мин → перезапуски стоп, ждёт ручного `service.start`
+- **ENV/PATH**: клиент и сервисы стартуют с явным PATH Termux (`TERMUX_BIN`) — survives подъём от root-стража
+- **selfheal**: при старте клиента проверяет `setup_done.json` (v:5) и supervisor → если что-то не так, сам переустанавливает неубиваемость
+
+---
+
+## 5. СТОП / ЗАПУСК
+
+| Действие | Как |
+|---|---|
+| Полная остановка (всё, включая стражей) | дашборд **⏹** или `sh ~/farm/farm_stop.sh` |
+| Запуск после остановки | `sh ~/farm/farm_start.sh` (поднимает keeper + supervisor) |
+| Перезапуск клиента | дашборд **♻** (умирает → supervisor поднимет за ~60с) |
+| Обновление | дашборд **⬆** / «⬆ Обновить всех» |
+
+`farm_stop.sh` по порядку: STOP-файлы (два!) → `setprop ctl.stop farmkeeper` (init-сервис, где есть) → pkill всего через su → lock-файлы прочищены.
+
+---
+
+## 6. ПРОТОКОЛ
+
+**Телефон → сервер:** `hello` (device_id, версия, инфо) · `heartbeat` (каждые 30с: батарея, uptime) · `result` (ответ на задачу) · WS-ping.
+
+**Задачи (сервер → телефон), v0.5:**
+
+| task | payload | Результат |
+|---|---|---|
+| `ping` | — | pong, uptime |
+| `exec` | `{command, timeout≤180}` | output (последние 4000 симв), код |
+| `service.start/stop` | `{name}` | ok, pid |
+| `service.status` | — | running/pid/desired/failing по каждому |
+| `file.read` | `{path, tail≤20000}` | хвост файла, только внутри ~/farm |
+| `update` | — | список обновлённого → самоперезапуск |
+| `restart` | — | ответ → смерть → supervisor поднимет |
+| `halt` | — | ответ → farm_stop.sh → полная остановка |
+
+Задачи выполняются **в фоне** (`spawn`) — долгий exec не вешает связь. `update` валидирует: sha256 каждого файла + `compile()` для .py **до** применения; что-то не так → ничего не применено, ошибка уходит на сервер.
+
+---
+
+## 7. ОБНОВЛЕНИЕ ПО ВОЗДУХУ — рабочий цикл
+
+```
+1. Правишь ~/farm-server/client/... (в main.py подними VERSION!)
+2. py_compile → curl /client/manifest (10 файлов?)
+3. Дашборд → ⬆ / «Обновить всех»
+4. Телефон: манифест → скачал изменившееся → проверил → применил атомарно
+   → ответил → os._exit(0) → supervisor поднял нового → ● мигнул и вернулся
+```
+
+Откат = вернуть старый файл в `client/` → снова ⬆. Кривой файл не применится никогда (проверка до записи).
+
+**Ручное** (если клиент совсем мёртв): `cd ~ && python boot.py` — докачает по sha256, убьёт старый клиент, поднимет supervisor. config.json никогда не трогается.
+
+---
+
+## 8. НОВЫЙ ТЕЛЕФОН
+
+```bash
+pkg install python
+cd ~ && curl -o boot.py http://gleb2009kiler-55019.portmap.host:55019/bootstrap.py && python boot.py
+```
+
+bootstrap: скачал 10 файлов → config.json с уникальным device_id → websockets → setup v5 (сам поставит Termux:Boot через root) → убил старое → supervisor → ● в дашборде.
+
+**Ручные шаги (автоматизировать нельзя):**
+- [ ] 1 раз открыть приложение **Termux:Boot** (иначе Android не отдаст BOOT_COMPLETED)
+- [ ] Настройки → Termux → Батарея → **Без ограничений**
+- [ ] Рекомендуется: снять блокировку экрана (PIN = после ребута фарм стартует только после разблокировки)
+- [ ] Прогнать тесты неубиваемости (ниже)
+
+---
+
+## 9. ДАШБОРД
+
+| Кнопка | Действие |
+|---|---|
+| клик по строке | выбрать устройство |
+| `ping` · `exec` · `статус` | диагностика |
+| `demo ▶/⏹` · `demo.log` | тестовый сервис |
+| `лог` · `sup` | **client.log / supervisor.log** — дебаг слоёв 2-3 из браузера |
+| `⬆` · `⬆ Обновить всех` | обновление |
+| `♻` · `⏹` | рестарт клиента / полная остановка |
+| `●` | онлайн = heartbeat <90с назад |
+
+---
+
+## 10. ЭКСПЛУАТАЦИОННЫЕ КОМАНДЫ
+
+**Через exec (дашборд):**
+```bash
+tail -50 ~/farm/logs/supervisor.log          # что делал supervisor
+tail -50 ~/farm/logs/client.log              # вывод клиента
+cat ~/farm/info/services_state.json          # desired
+ps -ef | grep -e farm -e supervisor          # кто жив
+su -c "tail -20 /data/local/tmp/farm-keeper.log"   # лог root-стража
+```
+
+**Тесты неубиваемости (новый телефон — прогнать все):**
+
+| Тест | Кто спасает, срок |
+|---|---|
+| `pkill -f farm/main.py` | supervisor, ≤60с |
+| `pkill -f supervisor.sh; pkill -f farm/main.py` | keeper (если жив), ~60с |
+| `service.stop demo` при работающем demo + `pkill -f services/demo` | watchdog, ≤10с |
+| Смахнуть/force-stop Termux | keeper (до ребута) / открыть руками |
+| **Ребут, не трогать 2 мин** | Termux:Boot → всё поднялось, ● зелёный |
+| Кнопка ⏹ → ничего не оживает; farm_start.sh → живой | STOP-механизм |
+
+---
+
+## 11. ТРОБЛШУТИНГ
+
+| Симптом | Причина | Лечение |
+|---|---|---|
+| «unknown task» | клиент старый | дашборд ⬆, сверить колонку Версия = 0.5 |
+| Телефон ● красный, exec не работает | клиент мёртв | sup/лог недоступны → на телефон: `tail supervisor.log`, `su -c tail .../farm-keeper.log` |
+| После ребута не поднялся | Termux:Boot не открыт / PIN | открыть приложение 1 раз; снять блокировку |
+| После ребута Termux убили — мёртв | keeper не живёт после ребута на этом телефоне | exec невозможен → открыть Termux руками, или заранее `su -c "setsid sh ~/farm/keeper.sh"` |
+| update вернул syntax/hash error | битый файл на сервере | в ответе ⬆ есть причина → чинить client/ |
+| Сервис failing | код падает | `лог` сервиса → чинить → `service.start` |
+| Два ● драться (мигает) | клиент запущен руками + supervisor | `pkill -f farm/main.py`, отдать supervisor'у |
+| supervisor.log молчит после ребута | Termux:Boot не отработал | открыть Termux:Boot, проверить `~/.termux/boot/farm.sh` |
+| Все офлайн разом | сервер/туннель | `curl /health` локально, portmap Active, `systemctl status openvpn-portmap farm-api` |
+
+---
+
+## 12. ИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ (честно)
+
+1. **Keeper не переживает ребут на этом телефоне** (нет init.rc/service.d). После ребута охрану несёт только Termux:Boot+supervisor+bashrc. Фикс-команда: `su -c "setsid sh ~/farm/keeper.sh"`. В роадмапе: selfheal должен оживлять keeper'а при каждом старте клиента.
+2. **API без авторизации** — любой, кто знает адрес portmap, рулит фермой. Закрыть на этапе безопасности.
+3. **Ротация только у client.log** — supervisor.log и logs/services/* растут вечно.
+4. PIN-телефоны: фарм после ребута стартует после первой разблокировки.
+5. Termux:Boot APK качается с GitHub — при блокировке ставить руками из F-Droid.
+
+---
+
+## 13. РОАДМАП
+
+| Этап | Что | Статус |
+|---|---|---|
+| 0 | Неубиваемость v5 сдана (ребут/убийство/стоп-старт — всё зелёное) | ✅ |
+| **1** | **Фарм v16.2 как сервис** (чёрный ящик в services/farm/) | ▶ СЛЕДУЮЩИЙ |
+| 2 | События фарма (farm_events.jsonl → heartbeat → SQLite) + outbox | ⬜ |
+| 3 | Алерты в Telegram (с сервера) | ⬜ |
+| 4 | Масштаб: 5+ телефонов, группы устройств | ⬜ |
+| 5 | Модульный фарм (input/bypass/zen/logic + config.json без кода) | ⬜ |
+| 6 | Безопасность (токены API), ротация логов, selfheal keeper'а, backup client/ в git | ⬜ |
+
+---
+
+*Заметку обновлять при: смене архитектуры, новых задачах протокола, новых телефонах с другой конфигурацией root (setup v5 сам выберет механизм — записывай какой).*
+
+---
+
+Заметка готова. Два момента, на которые обрати внимание в тексте — это честные долги системы: **пункт 12.1** (keeper после ребута не поднимается сам — фикс-команда уже в заметке, а нормальный фикс закину в этап 6) и **12.3** (ротация логов).
+
+Готов к этапу 1 — фарм в систему. Скидывай v16.2 (или скажи «берём тот из переписки»), верну адаптированный `services/farm/main.py` + манифест + кнопки дашборда.
