@@ -1,0 +1,153 @@
+# 📋 Шпаргалка: как устроен твой сервер
+
+## 🔄 Принцип работы (схема)
+
+```
+Телефоны в Европе / Ты с Windows
+        │
+        │ http://gleb2009kiler-55019.portmap.host:55019
+        ▼
+[Сервер portmap.io]  ──→  [OpenVPN туннель (TCP, порт 1194)]
+                                    │
+                                    ▼
+                        [Твой Debian дома]
+                                    │
+                                    ▼
+                        [FastAPI на порту 8000]
+```
+
+**Главная идея:** OpenVPN создаёт туннель ВНЕШНЕМУ → ВНУТРЕННЕМУ. Пакет из интернета идёт на порт 55019 portmap.io, пересылается через туннель на твой Debian, там его встречает FastAPI на порту 8000. Порты на роутере не открываем, домашний IP скрыт.
+
+---
+
+## 📁 Где что лежит на Debian
+
+### OpenVPN (туннель)
+| Что | Путь |
+|---|---|
+| Конфиг | `/etc/openvpn/portmap/farm-server.conf` |
+| Systemd-сервис | `/etc/systemd/system/openvpn-portmap.service` |
+| Имя сервиса | `openvpn-portmap` |
+
+### FastAPI (сайт/API)
+| Что | Путь |
+|---|---|
+| Проект | `/home/gleb/farm-server/` |
+| Виртуальное окружение | `/home/gleb/farm-server/venv/` |
+| Код | `/home/gleb/farm-server/main.py` |
+| Systemd-сервис | `/etc/systemd/system/farm-api.service` |
+| Имя сервиса | `farm-api` |
+
+### Публичный адрес
+```
+http://gleb2009kiler-55019.portmap.host:55019
+```
+(Проброс: `55019 → 8000` на твоём Debian)
+
+---
+
+## ⚙️ Управление (команды)
+
+### OpenVPN
+```bash
+sudo systemctl start   openvpn-portmap   # запустить
+sudo systemctl stop    openvpn-portmap   # остановить
+sudo systemctl restart openvpn-portmap   # перезапустить
+sudo systemctl status  openvpn-portmap   # статус
+sudo journalctl -u openvpn-portmap -f    # логи в реальном времени
+```
+
+### FastAPI
+```bash
+sudo systemctl start   farm-api
+sudo systemctl stop    farm-api
+sudo systemctl restart farm-api
+sudo systemctl status  farm-api
+sudo journalctl -u farm-api -f
+```
+
+### Запустить всё вместе
+```bash
+sudo systemctl start openvpn-portmap farm-api
+```
+
+### Остановить всё
+```bash
+sudo systemctl stop openvpn-portmap farm-api
+```
+
+---
+
+## 🔍 Диагностика (быстрые проверки)
+
+```bash
+# 1. Оба сервиса живы?
+systemctl is-active openvpn-portmap farm-api
+# должно быть: active active
+
+# 2. Туннель поднят?
+ip -brief addr show | grep tun
+# должно быть: tun0 UP 10.x.x.x/24
+
+# 3. FastAPI слушает?
+ss -tlnp | grep 8000
+# должно быть: 0.0.0.0:8000
+
+# 4. Локально отвечает?
+curl http://127.0.0.1:8000/health
+
+# 5. Трафик идёт через туннель?
+sudo tcpdump -i tun0 port 8000 -n
+```
+
+---
+
+## 🧪 Проверка снаружи
+
+**С любого устройства:**
+```
+http://gleb2009kiler-55019.portmap.host:55019
+```
+
+Должна открыться страница с галочкой ✓ и `host: debian`.
+
+---
+
+## 🔄 После перезагрузки Debian
+
+Ничего делать **не нужно** — оба сервиса настроены на автозапуск через `systemctl enable`. Система сама поднимет туннель и FastAPI.
+
+---
+
+## ⚠️ Если что-то сломалось
+
+**Чек-лист по порядку:**
+
+1. `systemctl is-active openvpn-portmap` → если не active, смотри `journalctl -u openvpn-portmap -n 30`
+2. `ip -brief addr | grep tun` → если нет `tun0`, проблема в OpenVPN
+3. `ss -tlnp | grep 8000` → если пусто, FastAPI не запустился
+4. Проверь интернет на Debian: `ping 8.8.8.8`
+5. Проверь что правило в portmap.io Active (зайди в веб-панель)
+
+---
+
+## 📝 Редактирование кода
+
+```bash
+cd ~/farm-server
+nano main.py                # править код
+sudo systemctl restart farm-api   # применить
+```
+
+---
+
+## 💡 Важно помнить
+
+- **HTTP без шифления** — норм, если пользуешься только ты
+- **Токены не настроены** — любой кто знает адрес может слать запросы. Для продакшена добавить `Authorization: Bearer`
+- **Автозапуск есть** — сервер переживёт reboot
+- **Windows больше не нужен** — всё на Debian
+
+---
+
+Сохраните эту шпаргалку куда-нибудь (в заметки, в файл `~/FARM-README.md`), и через месяц не придётся всё вспоминать заново 🚀
