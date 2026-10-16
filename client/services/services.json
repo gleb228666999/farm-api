@@ -1,0 +1,8 @@
+{
+  "demo": {
+    "type": "daemon",
+    "command": "python services/demo/main.py",
+    "autostart": false,
+    "restart": true
+  }
+}

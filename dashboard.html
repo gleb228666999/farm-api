@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>🚜 Farm</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui;background:#111;color:#ddd;margin:20px}
+table{border-collapse:collapse;width:100%;margin-top:12px}
+td,th{padding:8px 12px;border-bottom:1px solid #333;text-align:left;font-size:.95em}
+.on{color:#6f6}.off{color:#f66}
+button{background:#2a6;border:none;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer;margin:1px}
+button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}
+#out{background:#000;color:#9f9;padding:12px;border-radius:6px;margin-top:14px;
+     white-space:pre-wrap;font-family:monospace;max-height:340px;overflow:auto;display:none}
+.mut{color:#888;font-size:.85em}.sel{background:#1c2b1c}
+</style></head><body>
+<h1>🚜 Farm Dashboard</h1>
+<div class="mut" id="summary">загрузка...</div>
+<table><thead><tr><th>Устройство</th><th>Модель</th><th>Батарея</th>
+<th>Версия</th><th>Аптайм</th><th>Был</th><th>Действия</th></tr></thead>
+<tbody id="rows"></tbody></table>
+<div id="out"></div>
+<div style="margin-top:10px">
+<button class="b" onclick="bcast()">📢 Ping всем</button>
+<button class="u" onclick="updAll()">⬆ Обновить всех</button>
+</div>
+<div class="mut" style="margin-top:8px">клик по строке = выбрать устройство</div>
+<script>
+let selected=null;
+const $=id=>document.getElementById(id);
+function show(t){$('out').style.display='block';$('out').textContent=t}
+async function sendTask(body){
+  if(!selected){show('❌ сначала кликни по устройству');return null}
+  const r=await fetch(`/api/devices/${selected}/send`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){show('❌ '+await r.text());return null}
+  return await r.json();
+}
+async function waitResult(id,ms=20000){
+  const t0=Date.now();
+  while(Date.now()-t0<ms){
+    const r=await fetch('/api/results/'+id);
+    if(r.ok){const j=await r.json();if(j.status==='done')return j}
+    await new Promise(r=>setTimeout(r,500));
+  }
+  return null;
+}
+async function run(body,label,ms){
+  const t=await sendTask(body);if(!t)return;
+  show('⏳ '+label+'...');
+  const res=await waitResult(t.task_id,ms||20000);
+  if(!res){show('⏰ '+label+': нет ответа');return}
+  show(label+' ✓\n\n'+JSON.stringify(res.data,null,2).slice(0,4000));
+}
+function ping(d){selected=d;run({type:'task',task:'ping'},'ping')}
+function st(d){selected=d;run({type:'task',task:'service.status'},'service.status')}
+function demoOn(d){selected=d;run({type:'task',task:'service.start',payload:{name:'demo'}},'demo start')}
+function demoOff(d){selected=d;run({type:'task',task:'service.stop',payload:{name:'demo'}},'demo stop',30000)}
+function demoLog(d){selected=d;run({type:'task',task:'file.read',payload:{path:'logs/services/demo.log',tail:3000}},'demo.log')}
+function exe(d){
+  selected=d;
+  const c=prompt('Shell-команда на '+d+':','');
+  if(c)run({type:'task',task:'exec',payload:{command:c,timeout:30}},'$ '+c,35000);
+}
+async function upd(d){
+  selected=d;
+  const j=await(await fetch('/api/update',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:d})})).json();
+  if(!j.sent||!j.sent.length){show('❌ устройство офлайн');return}
+  show('⏳ обновление...');
+  const res=await waitResult(j.sent[0].task_id,60000);
+  if(res)show('обновление ✓\n\n'+JSON.stringify(res.data,null,2).slice(0,3000)
+    +'\n\n♻️ клиент перезапускается — ● мигнёт и вернётся');
+  else show('⏰ нет ответа (возможно, клиент уже перезапускается)');
+}
+async function updAll(){
+  if(!confirm('Обновить ВСЕ устройства?'))return;
+  const j=await(await fetch('/api/update',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({all:true})})).json();
+  show('📢 update отправлен на '+(j.sent?j.sent.length:0)+' устройств\n\n'
+    +(j.sent||[]).map(s=>s.device_id+': '+s.task_id).join('\n'));
+}
+async function bcast(){
+  await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'ping'})});
+  show('отправлено всем');
+}
+async function refresh(){
+  try{
+    const j=await(await fetch('/api/devices')).json();
+    $('summary').textContent='устройств: '+j.count+(selected?' | выбрано: '+selected:'');
+    $('rows').innerHTML=j.devices.map(d=>{
+      const bat=(d.info&&d.info.battery!=null)?d.info.battery:'?';
+      const model=(d.info&&d.info.model)?d.info.model:'?';
+      const sel=selected===d.device_id?' class="sel"':'';
+      return `<tr${sel} onclick="selected='${d.device_id}'">
+        <td>${d.device_id} ${d.online?'<span class="on">●</span>':'<span class="off">●</span>'}</td>
+        <td>${model}</td><td>${bat}%</td><td>${d.client_version||'?'}</td>
+        <td>${Math.round(d.uptime_sec/60)}м</td><td>${d.last_seen_sec}с</td>
+        <td><button onclick="ping('${d.device_id}')">ping</button>
+            <button class="b" onclick="exe('${d.device_id}')">exec</button>
+            <button class="b" onclick="st('${d.device_id}')">статус</button>
+            <button onclick="demoOn('${d.device_id}')">demo ▶</button>
+            <button class="r" onclick="demoOff('${d.device_id}')">demo ⏹</button>
+            <button class="b" onclick="demoLog('${d.device_id}')">лог</button>
+            <button class="u" onclick="upd('${d.device_id}')">⬆</button></td></tr>`;
+    }).join('')||'<tr><td colspan="7" class="mut">нет устройств</td></tr>';
+  }catch(e){$('summary').textContent='сервер недоступен'}
+}
+setInterval(refresh,3000);refresh();
+</script></body></html>
