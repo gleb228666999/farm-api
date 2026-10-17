@@ -4,5 +4,11 @@
     "command": "python services/demo/main.py",
     "autostart": false,
     "restart": true
+  },
+  "farm": {
+    "type": "daemon",
+    "command": "python services/farm/main.py",
+    "autostart": false,
+    "restart": true
   }
 }

@@ -21,6 +21,8 @@ button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}
 <div style="margin-top:10px">
 <button class="b" onclick="bcast()">📢 Ping всем</button>
 <button class="u" onclick="updAll()">⬆ Обновить всех</button>
+<button onclick="bcastFarmStart()">🚜 farm ▶ всем</button>
+<button class="r" onclick="bcastFarmStop()">🚜 farm ⏹ всем</button>
 </div>
 <div class="mut" style="margin-top:8px">клик по строке = выбрать устройство</div>
 <script>
@@ -55,6 +57,10 @@ function st(d){selected=d;run({type:'task',task:'service.status'},'service.statu
 function demoOn(d){selected=d;run({type:'task',task:'service.start',payload:{name:'demo'}},'demo start')}
 function demoOff(d){selected=d;run({type:'task',task:'service.stop',payload:{name:'demo'}},'demo stop',30000)}
 function demoLog(d){selected=d;run({type:'task',task:'file.read',payload:{path:'logs/services/demo.log',tail:3000}},'demo.log')}
+function farmOn(d){selected=d;run({type:'task',task:'service.start',payload:{name:'farm'}},'farm start')}
+function farmOff(d){selected=d;run({type:'task',task:'service.stop',payload:{name:'farm'}},'farm stop',30000)}
+function farmLog(d){selected=d;run({type:'task',task:'file.read',payload:{path:'logs/services/farm.log',tail:3000}},'farm.log')}
+function farmState(d){selected=d;run({type:'task',task:'file.read',payload:{path:'info/farm_state.json',tail:500}},'farm_state.json')}
 function exe(d){
   selected=d;
   const c=prompt('Shell-команда на '+d+':','');
@@ -83,6 +89,18 @@ async function bcast(){
     body:JSON.stringify({type:'task',task:'ping'})});
   show('отправлено всем');
 }
+async function bcastFarmStart(){
+  if(!confirm('Стартовать ФАРМ на ВСЕХ устройствах?'))return;
+  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'service.start',payload:{name:'farm'}})})).json();
+  show('🚜 farm start отправлен всем ('+(j.sent||0)+' шт.)\n\nпосле старта проверь farm.log');
+}
+async function bcastFarmStop(){
+  if(!confirm('Остановить ФАРМ на ВСЕХ устройствах?'))return;
+  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'service.stop',payload:{name:'farm'}})})).json();
+  show('🚜 farm stop отправлен всем ('+(j.sent||0)+' шт.)');
+}
 async function refresh(){
   try{
     const j=await(await fetch('/api/devices')).json();
@@ -101,6 +119,10 @@ async function refresh(){
             <button onclick="demoOn('${d.device_id}')">demo ▶</button>
             <button class="r" onclick="demoOff('${d.device_id}')">demo ⏹</button>
             <button class="b" onclick="demoLog('${d.device_id}')">лог</button>
+            <button onclick="farmOn('${d.device_id}')">farm ▶</button>
+            <button class="r" onclick="farmOff('${d.device_id}')">farm ⏹</button>
+            <button class="b" onclick="farmLog('${d.device_id}')">farm.log</button>
+            <button class="b" onclick="farmState('${d.device_id}')">state</button>
             <button class="u" onclick="upd('${d.device_id}')">⬆</button></td></tr>`;
     }).join('')||'<tr><td colspan="7" class="mut">нет устройств</td></tr>';
   }catch(e){$('summary').textContent='сервер недоступен'}

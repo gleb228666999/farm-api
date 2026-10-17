@@ -4,7 +4,7 @@
 
 # 🚜 ФЕРМА — ПОЛНАЯ ДОКУМЕНТАЦИЯ v2
 
-*Клиент v0.5 · сервер v0.3 · неубиваемость v5. Обновлено после сдачи этапа 0.*
+*Клиент v0.6 · сервер v0.3 · неубиваемость v5. Обновлено после сдачи этапа 1 (фарм как сервис).*
 
 ---
 
@@ -27,6 +27,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 | Сервисы ≠ клиент ≠ сервер | фарм не знает про сервер, сервер не знает про фарм |
 | Один файл — один писатель | `farm_state.json` пишет фарм, клиент только читает |
 | Состояние в `info/` | атомарная запись, переживает ребуты и апдейты |
+| Фарм = чёрный ящик | `services/farm/` не знает про сервер, сервер не знает про фарм; связь только через `info/farm_state.json` (этап 2) |
 | Любого можно убить | систему поднимет один из слоёв неубиваемости |
 | `client/` на сервере = истина | что там лежит — то и раздаётся телефонам при ⬆ |
 
@@ -41,8 +42,8 @@ http://gleb2009kiler-55019.portmap.host:55019
 ├── main.py            ← сервер. Правки → sudo systemctl restart farm-api
 ├── bootstrap.py       ← установщик (раздаётся по /bootstrap.py)
 ├── dashboard.html     ← панель. Правки → просто F5 в браузере, БЕЗ рестарта
-└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (10 файлов)
-    ├── main.py            ← клиент v0.5
+└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (11 файлов)
+    ├── main.py            ← клиент v0.6
     ├── setup.py           ← неубиваемость v5 (универсальная)
     ├── supervisor.sh      ← слой 3
     ├── keeper.sh          ← root-страж v2.1 (с логом)
@@ -52,8 +53,11 @@ http://gleb2009kiler-55019.portmap.host:55019
     │   ├── connection.py      ← WS + бэкофф 5→10→20→40→60с
     │   └── process_manager.py ← сервисы: pid/desired/failing
     └── services/
-        ├── services.json      ← манифест сервисов
-        └── demo/main.py       ← тестовый сервис
+        ├── services.json      ← манифест сервисов (demo, farm)
+        ├── demo/main.py       ← тестовый сервис
+        └── farm/main.py       ← 🚜 ФАРМ v16.2 (байпас ZEN + ферма Roblox;
+                                  state → info/farm_state.json; только stdlib,
+                                  pip на телефоне НЕ нужен)
 ```
 
 ### Systemd
@@ -78,7 +82,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 | `/api/update` (`{"device_id":...}` или `{"all":true}`) | обновление |
 | `/api/results/{task_id}` | результат задачи (TTL 1 час) |
 
-**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 10 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
+**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 11 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
 
 ---
 
@@ -88,7 +92,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 
 ```
 ~/farm/
-├── main.py            ← клиент v0.5. Запускается ТОЛЬКО supervisor'ом
+├── main.py            ← клиент v0.6. Запускается ТОЛЬКО supervisor'ом
 ├── config.json        ← device_id, server_url, ws_url. Апдейтом НЕ трогается
 ├── setup.py           ← ставит неубиваемость (selfheal зовёт сам)
 ├── supervisor.sh      ← слой 3
@@ -100,17 +104,19 @@ http://gleb2009kiler-55019.portmap.host:55019
 │   └── process_manager.py
 ├── services/          ← рабочие процессы
 │   ├── services.json
-│   └── demo/main.py
+│   ├── demo/main.py
+│   └── farm/main.py   ← 🚜 фарм v16.2 (state: info/farm_state.json)
 ├── info/              ← СОСТОЯНИЕ (переживает всё)
 │   ├── client.pid         ← по нему supervisor/keeper видят живость клиента
 │   ├── pids/<name>.pid    ← pid сервисов
 │   ├── services_state.json← desired: что ДОЛЖНО работать
+│   ├── farm_state.json    ← пишет ТОЛЬКО фарм (last_key_time); клиент читает (этап 2)
 │   ├── setup_done.json    ← маркер неубиваемости (v:5)
 │   └── STOP               ← ЕСТЬ = полный стоп (клиент+supervisor+keeper молчат)
 └── logs/
     ├── client.log        ← вывод main.py. Ротация: supervisor, >20МБ → хвост 3000 строк
     ├── supervisor.log    ← события supervisor. Ротации НЕТ
-    └── services/*.log    ← вывод сервисов. Ротации НЕТ
+    └── services/*.log    ← вывод сервисов (demo.log, farm.log). Ротации НЕТ
 ```
 
 ### Системные пути (вне ~/farm)
@@ -174,6 +180,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 - **failing**: 5 рестартов сервиса за 3 мин → перезапуски стоп, ждёт ручного `service.start`
 - **ENV/PATH**: клиент и сервисы стартуют с явным PATH Termux (`TERMUX_BIN`) — survives подъём от root-стража
 - **selfheal**: при старте клиента проверяет `setup_done.json` (v:5) и supervisor → если что-то не так, сам переустанавливает неубиваемость
+- **фарм-сервис**: сам находит su (PATH побит → /system/bin/su), ловит SIGTERM (сохраняет state), не требует pip
 
 ---
 
@@ -251,6 +258,8 @@ bootstrap: скачал 10 файлов → config.json с уникальным 
 | клик по строке | выбрать устройство |
 | `ping` · `exec` · `статус` | диагностика |
 | `demo ▶/⏹` · `demo.log` | тестовый сервис |
+| `farm ▶/⏹` · `farm.log` · `state` | 🚜 ФАРМ: старт/стоп сервиса, лог фарма, farm_state.json (таймер байпаса) |
+| `🚜 farm ▶/⏹ всем` | старт/стоп фарма на ВСЕХ устройствах разом |
 | `лог` · `sup` | **client.log / supervisor.log** — дебаг слоёв 2-3 из браузера |
 | `⬆` · `⬆ Обновить всех` | обновление |
 | `♻` · `⏹` | рестарт клиента / полная остановка |
@@ -313,7 +322,7 @@ su -c "tail -20 /data/local/tmp/farm-keeper.log"   # лог root-стража
 | Этап | Что | Статус |
 |---|---|---|
 | 0 | Неубиваемость v5 сдана (ребут/убийство/стоп-старт — всё зелёное) | ✅ |
-| **1** | **Фарм v16.2 как сервис** (чёрный ящик в services/farm/) | ▶ СЛЕДУЮЩИЙ |
+| 1 | Фарм v16.2 как сервис (чёрный ящик в services/farm/) | ✅ СДАН: services/farm/main.py + манифест + кнопки дашборда (farm ▶/⏹/лог/state, массовый старт); stdlib-only, state в info/farm_state.json |
 | 2 | События фарма (farm_events.jsonl → heartbeat → SQLite) + outbox | ⬜ |
 | 3 | Алерты в Telegram (с сервера) | ⬜ |
 | 4 | Масштаб: 5+ телефонов, группы устройств | ⬜ |
@@ -328,4 +337,15 @@ su -c "tail -20 /data/local/tmp/farm-keeper.log"   # лог root-стража
 
 Заметка готова. Два момента, на которые обрати внимание в тексте — это честные долги системы: **пункт 12.1** (keeper после ребута не поднимается сам — фикс-команда уже в заметке, а нормальный фикс закину в этап 6) и **12.3** (ротация логов).
 
-Готов к этапу 1 — фарм в систему. Скидывай v16.2 (или скажи «берём тот из переписки»), верну адаптированный `services/farm/main.py` + манифест + кнопки дашборда.
+---
+
+**Этап 1 СДАН.** Что вошло:
+
+- `client/services/farm/main.py` — фарм v16.2 как сервис: state → `info/farm_state.json` (атомарно), SIGTERM-обработчик, `requests` заменён на stdlib `urllib` (на телефоне pip НЕ нужен), сам ищет su, компактный лог мониторинга (1 строка/проверка). Логика байпаса/фермы не менялась.
+- `client/services/services.json` — добавлен сервис `farm` (autostart=false, restart=true).
+- `dashboard.html` — кнопки `farm ▶ / farm ⏹ / farm.log / state`, массовые `🚜 farm ▶/⏹ всем`.
+- `client/main.py` — VERSION 0.6 (после ⬆ клиент перезапустится и подтянет новый манифест).
+
+**Как включить фарм на телефоне:** дашборд ⬆ (обновить клиента до v0.6) → farm ▶ → farm.log (запуск, байпас). После `service.start` фарм переживает ребуты (desired=running) и падения (watchdog ≤10с).
+
+**Следующий — этап 2:** события фарма (`farm_events.jsonl` → heartbeat → SQLite) + outbox.

@@ -1,9 +1,11 @@
 """
-🤖 Farm Client v0.5
+🤖 Farm Client v0.6
 - v0.4: связь, exec, сервисы, watchdog, update по воздуху
 - v0.5: неубиваемость по схеме v7.2: client.pid для supervisor/стража,
         selfheal (сам переустанавливает неубиваемость), halt/restart,
         абсолютные пути (работает даже если PATH побит root-стражем)
+- v0.6: ЭТАП 1 — фарм v16.2 как сервис (services/farm/main.py),
+        манифест services.json + demo + farm, кнопки фарма в дашборде
 """
 import sys
 import os
@@ -29,7 +31,7 @@ if not (BASE / "core" / "connection.py").exists() or not (BASE / "config.json").
 from core.connection import Connection
 from core.process_manager import ProcessManager
 
-VERSION = "0.5"
+VERSION = "0.6"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
