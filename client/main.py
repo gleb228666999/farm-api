@@ -22,6 +22,9 @@
         в приватки на время окна), cookie.check (проверка кук, вылетела —
         замена из пула сервера, если пуст — из архива). Исходящие события:
         farm_events.jsonl + rega_events.jsonl
+- v0.11: (в сервисах) куки-гейт — фарм не делает байпас/фарм без кук:
+        0 сессий → сам запускает авторегистрацию (rega, flock от двойного
+        запуска) и ждёт; рега не дала кук — пауза 30 мин и снова
 """
 import sys
 import os
@@ -49,7 +52,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.10"
+VERSION = "0.11"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 

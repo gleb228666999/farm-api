@@ -10,6 +10,8 @@
 - Отработанные куки → архив сервера (можно поднять позже), мёртвые → удаляются.
 - Режим check: проверка кук на всех пакетах; вылетела кука → замена из пула,
   если пул пуст → из архива (вход по новой куке без полной регы).
+- Одиночный экземпляр (flock info/rega.lock): фарм и сервер не могут запустить
+  регу дважды; check при активной реге тоже пропускается.
 - Только stdlib (urllib вместо requests) — на телефоне pip НЕ нужен.
 
 Режимы: python services/rega/main.py [rega|check]
@@ -39,6 +41,7 @@ import sqlite3
 import random
 import string
 import hashlib
+import fcntl
 import subprocess
 import urllib.request
 import urllib.error
@@ -1677,6 +1680,25 @@ def rearm_farm():
 # ▶️ MAIN
 # ==========================================
 
+LOCK_FILE = BASE / "info" / "rega.lock"
+_LOCK_FP = [None]          # держим открытым до конца процесса — иначе flock отпустит
+
+
+def _acquire_lock():
+    """Одиночный экземпляр рега-сервиса (принцип v18.8 flock).
+    False = рега уже идёт (второй процесс выйдет с кодом 99)."""
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fp = open(LOCK_FILE, "w")
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fp.write(str(os.getpid()))
+        fp.flush()
+        _LOCK_FP[0] = fp
+        return True
+    except OSError:
+        return False
+
+
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
     mode = "rega"
@@ -1684,6 +1706,9 @@ def main():
         a = sys.argv[1].strip().lower()
         if a in ("check", "cookie", "c"):
             mode = "check"
+    if not _acquire_lock():
+        log("🛑 Рега/check уже идёт (лок info/rega.lock) — выхожу (код 99)")
+        sys.exit(99)
     log(f"🆕 REGA SERVICE START | режим: {mode} | device: {DEVICE_ID} | сервер: {SERVER or '❌'}")
     load_state()
     os.makedirs(OUT_DIR, exist_ok=True)

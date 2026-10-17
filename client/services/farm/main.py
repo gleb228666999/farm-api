@@ -25,6 +25,13 @@ v0.9 (чистая остановка):
     (com.roblox*) и браузеры, которые фарм сам открывает при байпасе.
     Телефон после остановки остаётся чистым, события farm.stop несёт closed=N.
 
+v0.11 (куки-гейт):
+- ✅ Байпас и фарм только при живых куках: перед циклом считаем сессии
+    (has_session по WebView DB — как в v18.8). Кук нет (0 сессий) → байпас
+    НЕ делается: фарм сам запускает авторегистрацию (services/rega, flock —
+    двойной запуск невозможен), ждёт её и только потом идёт обычный цикл.
+- ✅ Рега не дала кук → пауза 30 мин и новая попытка (само-восстановление).
+
 v16.2 (оригинал):
 - ✅ ВСЕГДА перезаписывает /storage/emulated/0/Delta/Autoexecute/1.lua при запуске
 - ✅ Прямой запрос к ZEN-API
@@ -44,6 +51,7 @@ import time
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import urllib.request
 import urllib.error
@@ -515,6 +523,142 @@ def run_harvest_session(hw):
 
 
 # ==========================================
+# 🍪 КУКИ-ГЕЙТ (v0.11): нет кук → сначала рега
+# ==========================================
+# Байпасу нужна залогиненная Дельта, фермерам — залогиненные клоны.
+# Кук нет (0 сессий в WebView DB) → байпас не делаем: сначала авторегистрация.
+# Принцип v18.8: total_sessions() == 0 → повторная авторегистрация.
+
+TERMUX_HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
+CHECK_DB = os.path.join(TERMUX_HOME, "Cookies_check.db")   # СВОЙ рабочий файл (не как у рега!)
+REGA_SCRIPT = FARM_BASE / "services" / "rega" / "main.py"
+REGA_WAIT_MAX = 4 * 3600        # сколько ждём окончания рега
+REGA_RETRY_PAUSE = 30 * 60      # рега не дала кук → пауза перед новой попыткой
+
+
+def _cookie_db_candidates(pkg):
+    base = f"/data/data/{pkg}/app_webview"
+    return [f"{base}/Default/Cookies",
+            f"{base}/Default/Network/Cookies",
+            f"{base}/Cookies"]
+
+
+def _copy_check_db(db):
+    run_su(f"rm -f '{CHECK_DB}' '{CHECK_DB}-wal' '{CHECK_DB}-journal' '{CHECK_DB}-shm'")
+    run_su(f"cp '{db}' '{CHECK_DB}' 2>/dev/null")
+    run_su(f"cp '{db}-wal' '{CHECK_DB}-wal' 2>/dev/null")
+    run_su(f"cp '{db}-shm' '{CHECK_DB}-shm' 2>/dev/null")
+    run_su(f"chmod 666 '{CHECK_DB}' '{CHECK_DB}-wal' '{CHECK_DB}-shm' 2>/dev/null")
+
+
+def _clean_check_db():
+    run_su(f"rm -f '{CHECK_DB}' '{CHECK_DB}-wal' '{CHECK_DB}-journal' '{CHECK_DB}-shm'")
+
+
+def has_session(pkg):
+    """Есть ли в WebView DB пакета живая .ROBLOSECURITY (кука)."""
+    for db in _cookie_db_candidates(pkg):
+        if not run_su(f"test -f '{db}'")[0]:
+            continue
+        _copy_check_db(db)
+        con = None
+        try:
+            con = sqlite3.connect(CHECK_DB)
+            has = con.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                              "AND name='cookies'").fetchone()
+            if not has:
+                continue
+            rows = con.execute("SELECT length(value) FROM cookies "
+                               "WHERE name='.ROBLOSECURITY'").fetchall()
+            if any(r[0] and r[0] > 40 for r in rows):
+                return True
+        except Exception:
+            pass
+        finally:
+            if con:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+            _clean_check_db()
+    return False
+
+
+def total_sessions():
+    """Сколько пакетов залогинено (клоны + main)."""
+    n = sum(1 for pkg in get_farm_packages() if has_session(pkg))
+    if has_session(PACKAGE_MAIN):
+        n += 1
+    return n
+
+
+def _rega_pid():
+    """pid живой рега-сервис или None (pid-файл пишет PM, клиент или мы)."""
+    try:
+        pid = int((FARM_BASE / "info" / "pids" / "rega.pid").read_text().strip())
+        cl = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
+        if "rega/main.py" in cl.replace("\x00", " "):
+            return pid
+    except Exception:
+        pass
+    return None
+
+
+def _clear_rega_pid(pid):
+    try:
+        p = FARM_BASE / "info" / "pids" / "rega.pid"
+        if p.exists() and p.read_text().strip() == str(pid):
+            p.unlink()
+    except Exception:
+        pass
+
+
+def handle_no_cookies():
+    """🍪 Кук нет → сначала авторегистрация, потом байпас/фарм.
+    Если рега уже идёт (запущена сервером/клиентом) — просто ждём её."""
+    log("🆘 Кук нет (0 сессий) — байпас и фарм отложены: сначала авторегистрация")
+    emit("farm.no_cookies")
+    kill_all_roblox()
+
+    pid = _rega_pid()
+    if pid:
+        log(f"🕒 Рега уже идёт (pid {pid}) — жду окончания...")
+        waited = 0
+        while _rega_pid() and waited < REGA_WAIT_MAX:
+            time.sleep(30)
+            waited += 30
+    else:
+        log("🚀 Запускаю авторегистрацию (services/rega)...")
+        (FARM_BASE / "logs" / "services").mkdir(parents=True, exist_ok=True)
+        logf = open(FARM_BASE / "logs" / "services" / "rega.log", "ab")
+        proc = subprocess.Popen(
+            [sys.executable, str(REGA_SCRIPT)],
+            cwd=str(FARM_BASE), stdout=logf, stderr=subprocess.STDOUT,
+            start_new_session=True)
+        try:
+            (FARM_BASE / "info" / "pids").mkdir(parents=True, exist_ok=True)
+            (FARM_BASE / "info" / "pids" / "rega.pid").write_text(str(proc.pid))
+        except Exception:
+            pass
+        emit("farm.rega_started", pid=proc.pid)
+        waited = 0
+        while proc.poll() is None and waited < REGA_WAIT_MAX:
+            time.sleep(10)
+            waited += 10
+        _clear_rega_pid(proc.pid)
+        log(f"🏁 Рега завершилась (ждал {waited // 60} мин)")
+
+    sessions = total_sessions()
+    if sessions > 0:
+        log(f"✅ Куки есть (сессий {sessions}) — продолжаю: байпас → фарм")
+        emit("farm.rega_done", sessions=sessions)
+    else:
+        log(f"⚠️ Рега не дала кук — пауза {REGA_RETRY_PAUSE // 60} мин и новая попытка")
+        emit("farm.rega_empty", sessions=0)
+        time.sleep(REGA_RETRY_PAUSE)
+
+
+# ==========================================
 # 🔗 БАЙПАС (ZEN-API)
 # ==========================================
 
@@ -728,6 +872,20 @@ def main():
          last_key_age_h=round((time.time() - state.get("last_key_time", 0)) / 3600, 1))
 
     while True:
+        # 🍪 КУКИ-ГЕЙТ: кук нет → байпас/фарм бессмысленны, сначала авторегистрация
+        try:
+            sessions = total_sessions()
+        except Exception as e:
+            log(f"⚠️ Проверка сессий упала ({e}) — считаю что куки есть")
+            sessions = 1
+        if sessions == 0:
+            try:
+                handle_no_cookies()
+            except Exception as e:
+                log(f"💥 Куки-гейт упал: {e}")
+                time.sleep(300)
+            continue
+
         # 🌾 ОКНО СБОРА: сервер назначил (20:00 МСК) — сначала сбор
         hw = harvest_window()
         if hw:
