@@ -4,7 +4,7 @@
 
 # 🚜 ФЕРМА — ПОЛНАЯ ДОКУМЕНТАЦИЯ v2
 
-*Клиент v0.6 · сервер v0.3 · неубиваемость v5. Обновлено после сдачи этапа 1 (фарм как сервис).*
+*Клиент v0.7 · сервер v0.3 · неубиваемость v5. Обновлено: этап 1 (фарм-сервис) + APK-менеджер (⬇ APK).*
 
 ---
 
@@ -42,8 +42,8 @@ http://gleb2009kiler-55019.portmap.host:55019
 ├── main.py            ← сервер. Правки → sudo systemctl restart farm-api
 ├── bootstrap.py       ← установщик (раздаётся по /bootstrap.py)
 ├── dashboard.html     ← панель. Правки → просто F5 в браузере, БЕЗ рестарта
-└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (11 файлов)
-    ├── main.py            ← клиент v0.6
+└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (12 файлов)
+    ├── main.py            ← клиент v0.7
     ├── setup.py           ← неубиваемость v5 (универсальная)
     ├── supervisor.sh      ← слой 3
     ├── keeper.sh          ← root-страж v2.1 (с логом)
@@ -51,7 +51,9 @@ http://gleb2009kiler-55019.portmap.host:55019
     ├── farm_start.sh      ← запуск
     ├── core/
     │   ├── connection.py      ← WS + бэкофф 5→10→20→40→60с
-    │   └── process_manager.py ← сервисы: pid/desired/failing
+    │   ├── process_manager.py ← сервисы: pid/desired/failing
+    │   └── apk_manager.py     ← ⬇ APK: скачивание из link-apps, pm install,
+    │                             versionCode-диф, перезагрузка при обновлении
     └── services/
         ├── services.json      ← манифест сервисов (demo, farm)
         ├── demo/main.py       ← тестовый сервис
@@ -59,6 +61,11 @@ http://gleb2009kiler-55019.portmap.host:55019
                                   state → info/farm_state.json; только stdlib,
                                   pip на телефоне НЕ нужен)
 ```
+
+**APK-менеджер (⬇ APK):** список ссылок лежит в github `staffere228-alt/apk` → файл `link-apps`
+(одна ссылка на строку; можно `имя|ссылка` и #комментарии). Кнопка качает каждый APK,
+ставит через `pm install -r -d` (su), сравнивает versionCode всех пакетов до/после.
+Если хоть один APK реально обновил версию → телефон сам перезагружается (после отправки результата).
 
 ### Systemd
 
@@ -82,7 +89,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 | `/api/update` (`{"device_id":...}` или `{"all":true}`) | обновление |
 | `/api/results/{task_id}` | результат задачи (TTL 1 час) |
 
-**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 11 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
+**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 12 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
 
 ---
 
@@ -92,7 +99,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 
 ```
 ~/farm/
-├── main.py            ← клиент v0.6. Запускается ТОЛЬКО supervisor'ом
+├── main.py            ← клиент v0.7. Запускается ТОЛЬКО supervisor'ом
 ├── config.json        ← device_id, server_url, ws_url. Апдейтом НЕ трогается
 ├── setup.py           ← ставит неубиваемость (selfheal зовёт сам)
 ├── supervisor.sh      ← слой 3
@@ -101,7 +108,8 @@ http://gleb2009kiler-55019.portmap.host:55019
 ├── farm_start.sh      ← ▶ запуск
 ├── core/
 │   ├── connection.py
-│   └── process_manager.py
+│   ├── process_manager.py
+│   └── apk_manager.py ← APK-менеджер (задача apk.update)
 ├── services/          ← рабочие процессы
 │   ├── services.json
 │   ├── demo/main.py
@@ -111,6 +119,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 │   ├── pids/<name>.pid    ← pid сервисов
 │   ├── services_state.json← desired: что ДОЛЖНО работать
 │   ├── farm_state.json    ← пишет ТОЛЬКО фарм (last_key_time); клиент читает (этап 2)
+│   ├── apk/               ← временные APK (кнопка ⬇ APK; чистится сама)
 │   ├── setup_done.json    ← маркер неубиваемости (v:5)
 │   └── STOP               ← ЕСТЬ = полный стоп (клиент+supervisor+keeper молчат)
 └── logs/
@@ -211,6 +220,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 | `service.status` | — | running/pid/desired/failing по каждому |
 | `file.read` | `{path, tail≤20000}` | хвост файла, только внутри ~/farm |
 | `update` | — | список обновлённого → самоперезапуск |
+| `apk.update` | `{links_url?, reboot?}` | ставит APK из link-apps (github staffere228-alt/apk); `reboot:true` — перезагрузить всегда, `reboot:false` — никогда, без ключа — при реальном обновлении версии; ответ уходит ДО перезагрузки |
 | `restart` | — | ответ → смерть → supervisor поднимет |
 | `halt` | — | ответ → farm_stop.sh → полная остановка |
 
@@ -259,6 +269,7 @@ bootstrap: скачал 10 файлов → config.json с уникальным 
 | `ping` · `exec` · `статус` | диагностика |
 | `demo ▶/⏹` · `demo.log` | тестовый сервис |
 | `farm ▶/⏹` · `farm.log` · `state` | 🚜 ФАРМ: старт/стоп сервиса, лог фарма, farm_state.json (таймер байпаса) |
+| `⬇ APK` · `⬇ APK всем` | установка/обновление APK из link-apps; при обновлении версии телефон перезагружается сам |
 | `🚜 farm ▶/⏹ всем` | старт/стоп фарма на ВСЕХ устройствах разом |
 | `лог` · `sup` | **client.log / supervisor.log** — дебаг слоёв 2-3 из браузера |
 | `⬆` · `⬆ Обновить всех` | обновление |
@@ -347,5 +358,11 @@ su -c "tail -20 /data/local/tmp/farm-keeper.log"   # лог root-стража
 - `client/main.py` — VERSION 0.6 (после ⬆ клиент перезапустится и подтянет новый манифест).
 
 **Как включить фарм на телефоне:** дашборд ⬆ (обновить клиента до v0.6) → farm ▶ → farm.log (запуск, байпас). После `service.start` фарм переживает ребуты (desired=running) и падения (watchdog ≤10с).
+
+**APK-менеджер (клиент v0.7):** кнопка `⬇ APK` (одно устройство) или `⬇ APK всем` → клиент качает
+`link-apps` из github `staffere228-alt/apk`, ставит каждый APK (`pm install -r -d` через su),
+сравнивает versionCode до/после. Обновилась хоть одна версия → телефон перезагружается сам
+(после ответа серверу, через 5с). Установка без смены версии — без ребута.
+Формат link-apps: одна ссылка на строку, поддерживаются `имя|ссылка` и #комментарии.
 
 **Следующий — этап 2:** события фарма (`farm_events.jsonl` → heartbeat → SQLite) + outbox.

@@ -1,11 +1,14 @@
 """
-🤖 Farm Client v0.6
+🤖 Farm Client v0.7
 - v0.4: связь, exec, сервисы, watchdog, update по воздуху
 - v0.5: неубиваемость по схеме v7.2: client.pid для supervisor/стража,
         selfheal (сам переустанавливает неубиваемость), halt/restart,
         абсолютные пути (работает даже если PATH побит root-стражем)
 - v0.6: ЭТАП 1 — фарм v16.2 как сервис (services/farm/main.py),
         манифест services.json + demo + farm, кнопки фарма в дашборде
+- v0.7: APK-менеджер: задача apk.update — скачать и поставить APK из
+        link-apps (github staffere228-alt/apk), при реальном обновлении
+        версии — телефон перезагружается ПОСЛЕ отправки результата
 """
 import sys
 import os
@@ -30,8 +33,9 @@ if not (BASE / "core" / "connection.py").exists() or not (BASE / "config.json").
 
 from core.connection import Connection
 from core.process_manager import ProcessManager
+from core.apk_manager import run_apk_update, reboot_phone
 
-VERSION = "0.6"
+VERSION = "0.7"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -259,6 +263,16 @@ async def handle_task(conn: Connection, msg: dict):
             log("♻️ обновлено, перезапуск (supervisor поднимет)")
             await asyncio.sleep(2)
             os._exit(0)
+        return
+
+    elif task == "apk.update":
+        # установка/обновление APK; перезагрузка телефона — ПОСЛЕ ответа серверу
+        data = await asyncio.to_thread(run_apk_update, payload)
+        await reply(data)
+        if data.get("reboot_now"):
+            log("📱 APK обновлены → перезагрузка телефона через 5с")
+            await asyncio.sleep(5)
+            await asyncio.to_thread(reboot_phone)
         return
 
     # --- обычные задачи ---
