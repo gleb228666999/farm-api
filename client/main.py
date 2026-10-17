@@ -32,6 +32,9 @@
         SIGKILL + чистка pid-файла); рега при остановке шлёт rega.stop и больше
         НЕ реармит фарм (остановленный фарм больше не встаёт сам); гейт ждёт
         освобождения flock-лока, если спавн рега упал с кодом 99
+- v0.14: (в сервисах) рега = 20 попыток (2 подхода × 10) ВСЕГДА, не важно
+        удачно или нет — досрочного выхода по достижении цели нет, излишки
+        идут в пул; после каждых 10 попыток отдых 15 мин (rate-limit тоже 15)
 """
 import sys
 import os
@@ -59,7 +62,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.13"
+VERSION = "0.14"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 

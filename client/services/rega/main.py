@@ -22,8 +22,10 @@
 После реги сервис ставит farm=running в services_state.json → watchdog
 клиента сам поднимет фарм. Регу может прервать SIGTERM (farm ⏹-стиль).
 
-v18.8 (принципы хозяина, без изменений):
-- 40 попыток = 4 раунда × 10 попыток, после раунда пауза 15 мин (rate-limit тоже 15)
+v18.8 (принципы хозяина):
+- 20 попыток = 2 подхода × 10 попыток, после каждых 10 — отдых 15 мин (rate-limit тоже 15)
+- ВСЕ 20 попыток делаются НЕЗАВИСИМО от результата (не важно, удачно или нет) —
+  излишки сверх цели (5) идут в пул на сервере
 - 1 телефон = 5 акков (ферма), излишки в пул
 - кука №1 → com.roblox.client (Delta) — байпасу нужна залогиненная Дельта
 - инъекция .ROBLOSECURITY в WebView SQLite + prefs.xml (nick/userid)
@@ -79,10 +81,11 @@ STATE_FILE = BASE / "info" / "rega_state.json"
 
 # --- рега: принципы v18.8 ---
 DEFAULT_TARGET = 5          # 1 телефон = 5 акков
-REG_ATTEMPTS = 10           # попыток в раунде
-MAX_ROUNDS = 4              # 4×10 = 40 попыток
-RATE_LIMIT_PAUSE = 15 * 60  # rate-limit → пауза 15 мин
-ROUND_PAUSE_MIN = 15        # между раундами 15 мин
+REG_ATTEMPTS = 10           # попыток в подходе
+MAX_ROUNDS = 2              # 2×10 = 20 попыток ВСЕГДА (не важно, удачно или нет)
+REG_TOTAL = MAX_ROUNDS * REG_ATTEMPTS  # 20 попыток
+ROUND_PAUSE = 15 * 60       # после каждых 10 попыток отдых 15 мин
+RATE_LIMIT_PAUSE = 15 * 60  # rate-limit → пауза тоже 15 мин
 FARMERS_LIMIT = 4           # клоны фермы (5-й = main)
 REG_MAIN_FIRST = True       # кука №1 → Delta (байпас)
 ARCHIVE_SCAN_LIMIT = 80
@@ -1301,58 +1304,53 @@ def registration_attempt(attempt_num):
 
 
 def collect_cookies(target_total):
-    """40 попыток = 4 раунда × 10, паузы 15 мин. Возвращает накопленное."""
+    """20 попыток (2 подхода × 10), отдых 15 мин после каждых 10 попыток.
+    ВСЕ 20 попыток делаются НЕЗАВИСИМО от результата — не важно, удачно или
+    нет: досрочного выхода по достижении цели НЕТ, излишки идут в пул.
+    Возвращает накопленное."""
     kept = []
-    total_attempts = MAX_ROUNDS * REG_ATTEMPTS
-    log(f"🎯 Рега: {total_attempts} попыток | цель {target_total}")
+    log(f"🎯 Рега: {REG_TOTAL} попыток ({MAX_ROUNDS}×{REG_ATTEMPTS}, "
+        f"отдых 15 мин после каждых {REG_ATTEMPTS}) | цель {target_total}")
     done = 0
-    aborted = False
-    for round_num in range(1, MAX_ROUNDS + 1):
+    consec_errors = 0
+    while done < REG_TOTAL:
         if stop_requested():
             break
-        log(f"🔁 Раунд {round_num}/{MAX_ROUNDS} | сделано {done} | аккаунтов {len(kept)}/{target_total}")
-        rate_limited = False
-        consec_errors = 0
-        for attempt in range(1, REG_ATTEMPTS + 1):
-            if len(kept) >= target_total or stop_requested():
-                break
-            done += 1
+        if done % REG_ATTEMPTS == 0:
+            round_num = done // REG_ATTEMPTS + 1
+            log(f"🔁 Подход {round_num}/{MAX_ROUNDS} | сделано {done} | аккаунтов {len(kept)}/{target_total}")
+        done += 1
+        result, rl = None, False
+        raised_exc = False
+        try:
+            result, rl = registration_attempt(done)
+        except Exception:
+            log("💥 Попытка упала с исключением")
             result, rl = None, False
-            raised_exc = False
-            try:
-                result, rl = registration_attempt(done)
-            except Exception:
-                log("💥 Попытка упала с исключением")
-                result, rl = None, False
-                consec_errors += 1
-                raised_exc = True
-            else:
-                consec_errors = 0
-            finally:
-                kill_main_only()
-                if not _hard_reset_main(f"после попытки {done}"):
-                    log("⚠️ Ресет после попытки не подтвердился")
-            emit("rega.attempt", n=done, ok=bool(result), nick=(result or {}).get("nick", ""))
-            if raised_exc and consec_errors >= 3:
-                log("🛑 3 подряд упавших попытки — мягкий стоп")
-                aborted = True
-                break
-            if rl:
-                rate_limited = True
-                break
-            if result:
-                kept.append(result)
-                save_cookie(result["cookie"], result["nick"], result["pass"])
-                log(f"🏅 Аккаунт {len(kept)}/{target_total}: {result['nick']}")
-        if aborted or len(kept) >= target_total or stop_requested():
+            consec_errors += 1
+            raised_exc = True
+        else:
+            consec_errors = 0
+        finally:
+            kill_main_only()
+            if not _hard_reset_main(f"после попытки {done}"):
+                log("⚠️ Ресет после попытки не подтвердился")
+        emit("rega.attempt", n=done, ok=bool(result), nick=(result or {}).get("nick", ""))
+        if raised_exc and consec_errors >= 3:
+            log("🛑 3 подряд упавших попытки — мягкий стоп")
             break
-        if round_num < MAX_ROUNDS:
-            pause_min = RATE_LIMIT_PAUSE // 60 if rate_limited else ROUND_PAUSE_MIN
-            log(f"⏸️ Пауза {pause_min} мин..." + (" (RATE-LIMIT)" if rate_limited else ""))
-            if interruptible_sleep(pause_min * 60, step=10):
+        if result:
+            kept.append(result)
+            save_cookie(result["cookie"], result["nick"], result["pass"])
+            log(f"🏅 Аккаунт {len(kept)}/{target_total}: {result['nick']}")
+        # ⏸️ отдых 15 мин: после каждых 10 попыток или при rate-limit
+        if rl or (done % REG_ATTEMPTS == 0 and done < REG_TOTAL):
+            why = "RATE-LIMIT" if rl else f"сделано {done}/{REG_TOTAL}"
+            log(f"⏸️ Отдых 15 мин... ({why})")
+            if interruptible_sleep(ROUND_PAUSE, step=10):
                 log("🛑 Стоп: пауза регы прервана")
                 break
-    log(f"🏁 Рега завершена: попыток {done}/{total_attempts} | аккаунтов {len(kept)}")
+    log(f"🏁 Рега завершена: попыток {done}/{REG_TOTAL} | аккаунтов {len(kept)}")
     ui_cache_clear()
     return kept
 

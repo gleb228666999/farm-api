@@ -50,6 +50,17 @@ v0.13 (полный стоп):
 - ✅ Гейт: если спавн рега вышел с кодом 99 (лок держит другая рега/check) —
     фарм ждёт освобождения лока (flock-проба) и пробует ещё раз.
 
+v0.14 (байпас v18.8 + рега 20 попыток):
+- ✅ Байпас портирован ИЗ СКРИПТА ХОЗЯИНА v18.8 без упрощений:
+    9 попыток (6 обычных + 3 с двойным кликом CLOSE_AD), точные UI-координаты
+    в ландшафте, ZEN-API с полным разбором ответа (ссылка/ключ/429-ретраи),
+    буфер в 3 способа (termux-api → service call parcel → вставка+дамп экрана),
+    открытие длинной ссылки в 4 фоллбэка (am start → paste → чанки → посимвольно),
+    чтение ключа в 4 способа, строгая проверка записи ключа (read-back).
+- ✅ Рега = 20 попыток ВСЕГДА (2×10), отдых 15 мин после каждых 10 — НЕ важно,
+    удачные или нет; излишки (>5) → общий пул НА СЕРВЕРЕ; телефоны, у которых
+    из 20 попыток меньше 5 удачных, добирают кук из этого пула (→ архив).
+
 v16.2 (оригинал):
 - ✅ ВСЕГДА перезаписывает /storage/emulated/0/Delta/Autoexecute/1.lua при запуске
 - ✅ Прямой запрос к ZEN-API
@@ -67,6 +78,7 @@ import sys
 import json
 import time
 import re
+import html
 import shutil
 import signal
 import fcntl
@@ -96,12 +108,42 @@ FARM_CHECK_INTERVAL = 30      # Как часто проверять окна ф
 FARM_PRELAUNCH_DELAY = 15     # Задержка перед обычным запуском фермера
 FARM_RESTART_DELAY = 15       # Задержка перед перезапуском вылетевшего фермера
 
-AD_BTN_X, AD_BTN_Y = 1000, 470
-
 FORCE_BYPASS = False
-DEBUG_MODE = True
 BYPASS_COOLDOWN = 86400
-MAX_RETRIES = 3
+
+# --- 🖱️ координаты байпаса (ландшафт) и задержки — ИЗ v18.8, БЕЗ изменений ---
+LINK_TAP       = (1000, 470)
+CLOSE_TRANSL_1 = (1126, 666)
+TRIGGER_AD     = (600, 700)
+CLOSE_AD       = (1240, 540)
+CONTINUE_1     = (600, 700)
+GOOGLE_ROW     = (470, 100)
+COPY_LINK      = (1023, 213)
+
+CONTINUE_KEY   = (530, 530)
+CLOSE_TRANSL_2 = (1126, 666)
+COPY_CODE      = (615, 680)
+
+OMNIBOX_TAP    = (640, 60)
+
+UI_INITIAL_DELAY  = 20     # ждём загрузки MM2 в Дельте
+COPY_SETTLE_DELAY = 4      # даём ссылке время скопироваться
+DBLCLICK_GAP      = 0.5    # пауза между двумя кликами CLOSE_AD
+
+UI_STEP_DELAYS = {
+    "LINK_TAP": 7, "SET_LANDSCAPE": 2, "CLOSE_TRANSL_1": 1,
+    "TRIGGER_AD": 1, "CLOSE_AD": 1, "CONTINUE_1": 2,
+    "GOOGLE_ROW": 1, "COPY_LINK": 3, "OPEN_ZEN_LINK": 30,
+    "CONTINUE_KEY": 6, "CLOSE_TRANSL_2": 1, "COPY_CODE": 3,
+}
+
+BYPASS_CLICK_RETRIES    = 6   # обычных попыток
+BYPASS_DBLCLICK_RETRIES = 3   # с двойным кликом CLOSE_AD (6+3 = 9)
+
+# 🔑 ключ лицензии (FREE_xxx / XXX_xxxxxxxxxxxxxxxx)
+KEY_RE = re.compile(r'\b(FREE_[A-Za-z0-9_\-]{8,}|[A-Z]{2,10}_[A-Za-z0-9]{16,})\b')
+ACCEPT_LOOSE_KEY = False      # принимать «похоже на ключ» без шаблона (в v18.8 выключено)
+
 PACKAGE_MAIN = "com.roblox.client"
 PLACE_ID = "142823291"
 
@@ -141,14 +183,86 @@ SU_BIN = find_su()
 def run_su(cmd, timeout=15):
     try:
         res = subprocess.run([SU_BIN, "-c", cmd], capture_output=True,
-                             text=True, timeout=timeout)
+                             text=True, timeout=timeout, errors="replace")
         return res.returncode == 0, res.stdout.strip(), res.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return False, "", "Timeout"
     except Exception as e:
         return False, "", str(e)
 
 
-def tap(x, y):
+def tap(x, y, delay=0, name=""):
+    if name:
+        log(f"👆 {name} ({x}, {y})")
     run_su(f"input tap {x} {y}", timeout=5)
+    if delay:
+        time.sleep(delay)
+
+
+def set_landscape():
+    run_su("settings put system accelerometer_rotation 0", timeout=5)
+    run_su("settings put system user_rotation 1", timeout=5)
+
+
+def set_portrait():
+    run_su("settings put system user_rotation 0", timeout=5)
+    run_su("settings put system accelerometer_rotation 1", timeout=5)
+
+
+def wake_screen():
+    ok, out, _ = run_su("dumpsys power | grep 'mWakefulness='", timeout=5)
+    if ok and "mWakefulness=Awake" in out:
+        return
+    log("🌅 Экран выключен — буджу")
+    run_su("input keyevent 224", timeout=5)
+    time.sleep(1)
+    run_su("input keyevent 82", timeout=5)
+    time.sleep(1)
+
+
+def select_all_delete():
+    run_su("input keycombination 113 29", timeout=5)
+    time.sleep(0.3)
+    run_su("input keyevent 67", timeout=5)
+    time.sleep(0.3)
+
+
+# ==========================================
+# 📄 UI DUMP (uiautomator, кэш 1с — как в v18.8)
+# ==========================================
+
+_UI_CACHE = {"ts": 0.0, "xml": ""}
+
+
+def ui_cache_clear():
+    _UI_CACHE["xml"] = ""
+    _UI_CACHE["ts"] = 0.0
+
+
+def ui_dump():
+    if time.time() - _UI_CACHE["ts"] < 1.0:
+        return _UI_CACHE["xml"]
+    ok, out, _ = run_su(
+        "rm -f /data/local/tmp/ui.xml; "
+        "uiautomator dump /data/local/tmp/ui.xml >/dev/null 2>&1; "
+        "cat /data/local/tmp/ui.xml 2>/dev/null", timeout=25)
+    xml = out if (ok and out) else ""
+    _UI_CACHE["ts"] = time.time()
+    _UI_CACHE["xml"] = xml
+    return xml
+
+
+def get_visible_text():
+    xml = ui_dump()
+    if not xml:
+        return []
+    texts = []
+    for attr in ("text", "content-desc"):
+        for raw in re.findall(rf'{attr}="([^"]+)"', xml):
+            t = html.unescape(raw).strip()
+            if t:
+                texts.append(t)
+    return texts
 
 
 # ==========================================
@@ -192,6 +306,10 @@ def graceful_stop(reason: str):
     except Exception as e:
         log(f"⚠️ зачистка роблоксов: {e}")
         closed = -1
+    try:
+        set_portrait()   # байпас мог оставить ландшафт — вернуть портрет
+    except Exception:
+        pass
     try:
         # контрольный добой: если рега пережила SIGTERM — SIGKILL (без ожидания)
         if _rega_pid():
@@ -781,49 +899,194 @@ def handle_no_cookies(reason="нет кук"):
 
 
 # ==========================================
-# 🔗 БАЙПАС (ZEN-API)
+# 🔗 БАЙПАС — ПОЛНЫЙ ПОРТ ИЗ v18.8 (скрипт хозяина)
+# 9 попыток (6 обычных + 3 с двойным кликом), координаты в ландшафте,
+# ZEN-API с разбором link/ключ и ретраями 429, буфер в 3 способа,
+# открытие ссылки в 4 фоллбэка, чтение ключа в 4 способа.
 # ==========================================
 
-def get_link_from_browser():
-    try:
-        res = subprocess.run(
-            ["/data/data/com.termux/files/usr/bin/termux-clipboard-get"],
-            capture_output=True, text=True, timeout=3
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            match = re.search(r'(https?://[^\s\"\'<>\}\]\)\;]+)', res.stdout.strip())
-            if match:
-                return match.group(0).rstrip('.,;')
-    except Exception:
-        pass
+# --- 📋 буфер обмена (termux-api + фоллбэки) ---
+TERMUX_GET = ("termux-clipboard-get",
+              "/data/data/com.termux/files/usr/bin/termux-clipboard-get")
+TERMUX_SET = ("termux-clipboard-set",
+              "/data/data/com.termux/files/usr/bin/termux-clipboard-set")
 
-    ok, out, _ = run_su("/system/bin/dumpsys activity activities", timeout=5)
-    if ok and out:
-        match = re.search(r'(https?://[^\s\"\'<>\}\]\)\;]+)', out)
-        if match:
-            return match.group(0).rstrip('.,;')
+
+def termux_clipboard_get():
+    for cmd in TERMUX_GET:
+        try:
+            res = subprocess.run([cmd], capture_output=True, text=True, timeout=3)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
     return None
 
 
-def bypass_with_zen(url):
-    if not ZEN_API_KEY or ZEN_API_KEY == "YOUR_API_KEY_HERE":
-        log("❌ ZEN_API_KEY не настроен!")
-        return None
+def termux_clipboard_set(text):
+    for cmd in TERMUX_SET:
+        try:
+            res = subprocess.run([cmd], input=text, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+    return False
 
+
+# --- 🔎 распознавание ссылок ---
+def _looks_like_url(t):
+    if not t:
+        return False
+    t = t.strip()
+    if len(t) < 8:
+        return False
+    if t.startswith("http") or "://" in t:
+        return True
+    if re.match(r'^(www\.)?[a-z0-9-]+\.[a-z]{2,}([/?].*)?$', t, re.I):
+        return True
+    if re.search(r'(lootlabs|linkvertise|work\.ink|izen|zen\.lol|\.gg/|\.ink/|relay|platorelay)', t, re.I):
+        return True
+    return False
+
+
+def _normalize_url(t):
+    t = t.strip()
+    return t if t.startswith("http") else "https://" + t
+
+
+def get_visible_url():
+    for t in get_visible_text():
+        if _looks_like_url(t):
+            return t
+    return ""
+
+
+# --- 📋 чтение буфера: termux-api → service call parcel → вставка + дамп ---
+def _extract_url_from_parcel(hexdump):
+    tokens = re.findall(r'\b[0-9a-fA-F]{8}\b', hexdump)
+    if not tokens:
+        return None
     try:
-        clean = url.strip()
-        if not clean.startswith(("http://", "https://")):
-            log("❌ Invalid URL")
-            return None
-        encoded = urllib.parse.quote(clean, safe=":/?=&#")
-    except Exception as e:
-        log(f"❌ URL encode error: {e}")
+        data = b''.join(bytes.fromhex(t)[::-1] for t in tokens)
+    except ValueError:
         return None
+    text = data.decode('utf-16-le', errors='ignore')
+    m = re.search(r'https?://[^\s\x00-\x1f]+', text)
+    return m.group(0) if m else None
 
-    endpoint = f"{ZEN_API_URL}?url={encoded}"
-    headers = {"x-api-key": ZEN_API_KEY, "User-Agent": "FarmBot/16.2"}
 
-    log(f"🔗 Запрос к ZEN-API: {clean[:60]}...")
+def _read_via_paste_dump():
+    log("📋 Читаю буфер через вставку + дамп экрана...")
+    run_su(f"input tap {OMNIBOX_TAP[0]} {OMNIBOX_TAP[1]}")
+    time.sleep(1.5)
+    run_su("input keyevent 279")  # PASTE
+    time.sleep(2)
+    for attempt in range(3):
+        u = get_visible_url()
+        if u:
+            log(f"   🎯 Найдено в дампе: {u}")
+            return _normalize_url(u)
+        log(f"   ♻️ Дамп пуст, попытка {attempt + 2}/3...")
+        time.sleep(2)
+    return ""
+
+
+def get_clipboard():
+    t = termux_clipboard_get()
+    if t and _looks_like_url(t):
+        return _normalize_url(t)
+
+    for cmd in (
+        "service call clipboard 2 s16 com.termux i32 0",
+        "service call clipboard 2 s16 com.termux s16 com.termux i32 0",
+        "service call clipboard 2 i32 0",
+    ):
+        ok, out, _ = run_su(cmd, timeout=5)
+        if ok:
+            url = _extract_url_from_parcel(out)
+            if url:
+                log(f"   🎯 Прочитано через service call: {url}")
+                return url
+
+    return _read_via_paste_dump()
+
+
+# --- 🔑 чтение ключа лицензии (FREE_xxx) — 4 способа, как в v18.8 ---
+_CLIP_PARCEL_CMDS = (
+    "service call clipboard 2 s16 com.termux i32 0",
+    "service call clipboard 2 s16 com.termux s16 com.termux i32 0",
+    "service call clipboard 2 i32 0",
+)
+
+
+def get_copied_key():
+    time.sleep(2)
+
+    t = termux_clipboard_get()
+    if t:
+        m = KEY_RE.search(t)
+        if m:
+            log(f"   🎯 Ключ через termux-api: {m.group(1)}")
+            return m.group(1)
+        if ACCEPT_LOOSE_KEY and not _looks_like_url(t) and 5 < len(t) <= 200:
+            log(f"   ⚠️ LOOSE-ключ из буфера: {t[:40]}...")
+            return t.strip()
+
+    for cmd in _CLIP_PARCEL_CMDS:
+        ok, out, _ = run_su(cmd, timeout=5)
+        if ok:
+            tokens = re.findall(r'\b[0-9a-fA-F]{8}\b', out)
+            if tokens:
+                try:
+                    data = b''.join(bytes.fromhex(tk)[::-1] for tk in tokens)
+                except ValueError:
+                    continue
+                text = data.decode('utf-16-le', errors='ignore').replace('\x00', ' ')
+                m = KEY_RE.search(text)
+                if m:
+                    log(f"   🎯 Ключ через service call: {m.group(1)}")
+                    return m.group(1)
+                if ACCEPT_LOOSE_KEY:
+                    stripped = text.strip()
+                    if stripped and not _looks_like_url(stripped) and 5 < len(stripped) <= 200:
+                        log(f"   ⚠️ LOOSE-ключ из parcel: {stripped[:40]}...")
+                        return stripped
+
+    log("🔑 Ищу ключ на экране (дамп)...")
+    for t in get_visible_text():
+        m = KEY_RE.search(t)
+        if m:
+            log(f"   🎯 Ключ на экране: {m.group(1)}")
+            return m.group(1)
+
+    log("🔑 Вставляю буфер в адресную строку и читаю дамп...")
+    run_su(f"input tap {OMNIBOX_TAP[0]} {OMNIBOX_TAP[1]}")
+    time.sleep(1)
+    run_su("input keyevent 279")  # PASTE
+    time.sleep(1.5)
+    for t in get_visible_text():
+        m = KEY_RE.search(t)
+        if m:
+            log(f"   🎯 Ключ из вставки: {m.group(1)}")
+            return m.group(1)
+
+    if ACCEPT_LOOSE_KEY:
+        candidates = [t for t in get_visible_text() if not _looks_like_url(t) and 10 < len(t) <= 200]
+        if candidates:
+            candidates.sort(key=len, reverse=True)
+            log(f"   ⚠️ LOOSE-ключ с экрана: {candidates[0][:40]}...")
+            return candidates[0]
+
+    return None
+
+
+# --- 🌐 ZEN-API (полный разбор ответа v18.8) ---
+def zen_bypass(original_link, _retry=0):
+    """Возвращает ("link", url) | ("key", key) | None."""
+    log(f"🔗 Запрос к ZEN-API: {original_link[:60]}...")
+    headers = {"x-api-key": ZEN_API_KEY, "User-Agent": "FarmBot/18.8"}
+    endpoint = f"{ZEN_API_URL}?url={urllib.parse.quote(original_link, safe='')}"
 
     code, body = None, ""
     try:
@@ -837,59 +1100,176 @@ def bypass_with_zen(url):
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             body = ""
-    except urllib.error.URLError as e:
-        log(f"🌐 Connection error: {e.reason}")
+    except urllib.error.URLError:
+        log("🌐 Ошибка соединения")
         return None
     except Exception as e:
-        log(f"💥 Exception: {type(e).__name__}: {e}")
+        log(f"⏰ Запрос не удался: {type(e).__name__}: {e}")
         return None
 
-    log(f"📡 HTTP {code}")
-
-    if code == 200:
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            log(f"❌ Invalid JSON: {body[:100]}")
+    log(f"📥 HTTP {code}")
+    if code == 429:
+        if _retry >= 3:
+            log("❌ Слишком много 429 — отмена запроса")
             return None
-
-        if data.get("status") == "success" and isinstance(data.get("result"), str):
-            key = data["result"].strip()
-            if key.startswith("FREE_") or len(key) > 10:
-                log(f"✅ KEY: {key}")
-                return key
-            else:
-                log(f"⚠️ Unexpected key format: {key[:20]}")
-        else:
-            log(f"⚠️ No key in response: {data}")
-    elif code == 401:
-        log("❌ Invalid API key (401)")
-    elif code == 403:
-        log(f"❌ Forbidden (403): {body[:100]}")
-    elif code == 429:
-        log("⏳ Rate limit (429) — жду 60 сек")
+        log("⏳ Rate limit, жду 60с...")
         time.sleep(60)
-        return bypass_with_zen(url)
-    else:
+        return zen_bypass(original_link, _retry + 1)
+    if code != 200:
         log(f"❌ HTTP {code}: {body[:100]}")
+        return None
 
+    try:
+        data = json.loads(body)
+    except ValueError:
+        log(f"❌ Некорректный JSON: {body[:100]}")
+        return None
+    log(f"📥 API: {str(data)[:200]}")
+
+    raw = data.get("result") or data.get("destination") or data.get("link")
+    if isinstance(raw, dict):
+        raw = raw.get("url") or raw.get("link") or raw.get("destination") or ""
+    result = str(raw).strip() if raw else ""
+
+    if result:
+        if result.startswith("http"):
+            return ("link", result)
+        m = KEY_RE.search(result)
+        if m:
+            return ("key", m.group(1))
+        m = re.search(r'(https?://[^\s"\']+)', result)
+        if m:
+            return ("link", m.group(0))
+
+    m = re.search(r'(https?://[^\s"\']+)', body)
+    if m:
+        return ("link", m.group(0))
     return None
 
 
+# --- 🌐 открытие длинного bypass-URL: am start → paste → чанки → посимвольно ---
+def inject_url_via_ui(url):
+    if not url:
+        return False
+    log(f"🌐 Открываю bypass-ссылку ({len(url)} символов)...")
+    host = re.sub(r'^https?://', '', url).split('/')[0].split(':')[0].lower()
+
+    escaped = url.replace("'", "'\\''")
+    ok, _, err = run_su(f"am start -a android.intent.action.VIEW -d '{escaped}'", timeout=10)
+    if ok:
+        log("   ✅ am start выполнен, жду загрузку...")
+        time.sleep(5)
+        if any(host in t.lower() for t in get_visible_text()):
+            log(f"   ✅ Домен {host} на экране — страница открыта")
+            return True
+        vis = get_visible_url().lower()
+        if host in vis:
+            log("   ✅ Домен виден в адресной строке")
+            return True
+        log("   ⚠️ Домен не найден после am start, пробую ввод в строку...")
+    else:
+        log(f"   ⚠️ am start ошибка: {err}")
+
+    termux_clipboard_set(url)
+    esc = url.replace("'", "'\\''")
+    run_su(f"am broadcast -a clipper.set -e text '{esc}'", timeout=5)
+
+    tap(*OMNIBOX_TAP, 0.3, "OMNIBOX (1)")
+    tap(*OMNIBOX_TAP, 0.3, "OMNIBOX (2)")
+    tap(*OMNIBOX_TAP, 0.5, "OMNIBOX (3)")
+    time.sleep(1)
+    select_all_delete()
+    run_su("input keyevent 279", timeout=5)  # PASTE
+    time.sleep(1.5)
+    vis = get_visible_url()
+    log(f"   🔎 В строке: {vis[:60]}... ({len(vis)}/{len(url)})")
+    if host in vis.lower() and len(vis) >= len(url) * 0.8:
+        run_su("input keyevent 66", timeout=5)  # ENTER
+        time.sleep(1)
+        log("   ✅ URL вставлен полностью и открыт")
+        return True
+
+    log("📝 Вставляю частями по 150 символов...")
+    select_all_delete()
+    chunks = [url[i:i + 150] for i in range(0, len(url), 150)]
+    all_ok = True
+    for ch in chunks:
+        safe = ch.replace("'", "'\\''").replace(" ", "%s")
+        ok2, _, _ = run_su(f"input text '{safe}'", timeout=10)
+        if not ok2:
+            all_ok = False
+            break
+        time.sleep(0.15)
+    if all_ok:
+        run_su("input keyevent 66", timeout=5)
+        time.sleep(1)
+        log("   ✅ Чанковый ввод завершён")
+        return True
+
+    log("🔡 Крайний случай: посимвольный ввод...")
+    select_all_delete()
+    for ch in url:
+        low = ch.lower()
+        if 'a' <= low <= 'z':
+            code = 29 + (ord(low) - ord('a'))
+            if ch.isupper():
+                run_su(f"input keycombination 59 {code}", timeout=3)
+            else:
+                run_su(f"input keyevent {code}", timeout=3)
+        elif '0' <= low <= '9':
+            run_su(f"input keyevent {7 + (ord(low) - ord('0'))}", timeout=3)
+        elif low == '-':
+            run_su("input keyevent 69", timeout=3)
+        elif low == '_':
+            run_su("input keycombination 59 69", timeout=3)
+        elif low == '.':
+            run_su("input keyevent 56", timeout=3)
+        elif low == '/':
+            run_su("input keyevent 76", timeout=3)
+        elif low == ':':
+            run_su("input keycombination 59 74", timeout=3)
+        elif low == '?':
+            run_su("input keycombination 59 76", timeout=3)
+        elif low == '=':
+            run_su("input keyevent 70", timeout=3)
+        elif low == '&':
+            run_su("input keycombination 59 14", timeout=3)
+        elif low == '%':
+            run_su("input keycombination 59 12", timeout=3)
+        elif low == '#':
+            run_su("input keycombination 59 10", timeout=3)
+        elif low == '+':
+            run_su("input keyevent 78", timeout=3)
+        elif low == '@':
+            run_su("input keyevent 77", timeout=3)
+        elif low == ';':
+            run_su("input keyevent 74", timeout=3)
+        elif low == ',':
+            run_su("input keyevent 55", timeout=3)
+        elif low == ' ':
+            run_su("input keyevent 62", timeout=3)
+        else:
+            # неизвестный символ — input text, чтобы URL не обрезался
+            esc3 = ch.replace("\\", "\\\\").replace("'", "'\\''")
+            run_su(f"input text '{esc3}'", timeout=3)
+        time.sleep(0.02)
+    run_su("input keyevent 66", timeout=5)
+    time.sleep(1)
+    return True
+
+
 def inject_key(key):
+    """💾 Запись ключа в файл license + честная проверка read-back (v18.8)."""
     if not key:
         log("❌ Ключ пустой")
         return False
-
     log(f"💉 ЗАПИСЬ КЛЮЧА В ФАЙЛ: {DELTA_LICENSE_PATH}")
     log(f"   🔑 Ключ: {key}")
-
     try:
         folder = os.path.dirname(DELTA_LICENSE_PATH)
         if not os.path.exists(folder):
             run_su(f"mkdir -p '{folder}'", timeout=5)
             log(f"   📁 Создана папка: {folder}")
-
         try:
             with open(DELTA_LICENSE_PATH, 'w') as f:
                 f.write(key)
@@ -902,64 +1282,146 @@ def inject_key(key):
                 log(f"❌ Ошибка записи через su: {err}")
                 return False
             log("✅ Ключ записан через su")
-
         run_su(f"chmod 644 '{DELTA_LICENSE_PATH}'", timeout=3)
-
         try:
             with open(DELTA_LICENSE_PATH, 'r') as f:
                 content = f.read().strip()
             if content == key:
                 log("✅ Ключ успешно проверен в файле")
             else:
-                log(f"⚠️ Содержимое файла отличается: {content[:20]}...")
+                log(f"❌ Содержимое файла отличается: '{content[:20]}...' — запись НЕ засчитана")
+                return False
         except Exception as e:
-            log(f"⚠️ Не удалось проверить файл (возможно, нужен su для чтения): {e}")
-
+            log(f"⚠️ Не удалось проверить файл (нужен su для чтения?): {e}")
         return True
-
     except Exception as e:
         log(f"❌ Ошибка записи файла: {e}")
         return False
 
 
-def run_bypass_cycle():
-    emit("bypass.start")
-    for attempt in range(1, MAX_RETRIES + 1):
-        log(f"🔁 Байпас {attempt}/{MAX_RETRIES}")
+def run_bypass_attempt(attempt, total, use_double_click=False):
+    """🔁 Одна попытка байпаса — UI-флоу v18.8 (координаты, ландшафт)."""
+    mode = "🔥 ДВОЙНОЙ КЛИК CLOSE_AD" if use_double_click else "обычные клики"
+    log(f"\n{'=' * 50}\n🔁 БАЙПАС {attempt}/{total} [{mode}]\n{'=' * 50}")
 
+    try:
         kill_all_roblox()
+        wake_screen()
         launch_delta()
-        time.sleep(25)
+        log(f"⏳ Ждем {UI_INITIAL_DELAY}с загрузки MM2...")
+        time.sleep(UI_INITIAL_DELAY)
 
-        log("📺 Тап рекламы...")
-        tap(AD_BTN_X, AD_BTN_Y)
-        time.sleep(1.5)
-        tap(AD_BTN_X, AD_BTN_Y)
+        tap(*LINK_TAP, UI_STEP_DELAYS["LINK_TAP"], "LINK_TAP")
+        set_landscape()
+        time.sleep(UI_STEP_DELAYS["SET_LANDSCAPE"])
+        tap(*CLOSE_TRANSL_1, UI_STEP_DELAYS["CLOSE_TRANSL_1"], "CLOSE_TRANSL_1")
+        tap(*TRIGGER_AD, UI_STEP_DELAYS["TRIGGER_AD"], "TRIGGER_AD")
+
+        if use_double_click:
+            log(f"👆👆 ДВОЙНОЙ КЛИК CLOSE_AD {CLOSE_AD}")
+            tap(*CLOSE_AD, DBLCLICK_GAP, "CLOSE_AD (двойной 1/2)")
+            tap(*CLOSE_AD, UI_STEP_DELAYS["CLOSE_AD"], "CLOSE_AD (двойной 2/2)")
+        else:
+            tap(*CLOSE_AD, UI_STEP_DELAYS["CLOSE_AD"], "CLOSE_AD")
+
+        tap(*CONTINUE_1, UI_STEP_DELAYS["CONTINUE_1"], "CONTINUE_1")
+        tap(*GOOGLE_ROW, UI_STEP_DELAYS["GOOGLE_ROW"], "GOOGLE_ROW")
+        tap(*COPY_LINK, UI_STEP_DELAYS["COPY_LINK"], "COPY_LINK")
+
+        log(f"⏳ Даю ссылке {COPY_SETTLE_DELAY}с на копирование...")
+        time.sleep(COPY_SETTLE_DELAY)
+
+        copied_link = get_clipboard()
+        if copied_link:
+            log(f"📋 Исходная ссылка: {copied_link[:70]}")
+        if not copied_link or not _looks_like_url(copied_link):
+            log("⚠️ Ссылка не получена, повтор...")
+            set_portrait()
+            time.sleep(3)
+            return None
+        copied_link = _normalize_url(copied_link)
+
+        zen = zen_bypass(copied_link)
+        if not zen:
+            log("❌ API не дал результат, повтор...")
+            set_portrait()
+            time.sleep(5)
+            return None
+        kind, value = zen
+
+        if kind == "key":
+            log(f"🎯 API отдал КЛЮЧ напрямую: {value[:50]}...")
+            set_portrait()
+            kill_all_roblox()
+            time.sleep(2)
+            return value
+
+        log(f"✅ Bypass-ссылка: {value[:60]}... ({len(value)} символов)")
+        if not inject_url_via_ui(value):
+            log("⚠️ URL не открылся, повтор...")
+            set_portrait()
+            time.sleep(3)
+            return None
+
+        log(f"⏳ {UI_STEP_DELAYS['OPEN_ZEN_LINK']}с загрузки страницы...")
+        time.sleep(UI_STEP_DELAYS["OPEN_ZEN_LINK"])
+
+        tap(*CONTINUE_KEY, UI_STEP_DELAYS["CONTINUE_KEY"], "CONTINUE_KEY")
+        tap(*CLOSE_TRANSL_2, UI_STEP_DELAYS["CLOSE_TRANSL_2"], "CLOSE_TRANSL_2")
+        tap(*COPY_CODE, UI_STEP_DELAYS["COPY_CODE"], "COPY_CODE")
+
+        log("⏳ Даю ключу 3с на копирование...")
         time.sleep(3)
+        key = get_copied_key()
 
-        link = get_link_from_browser()
-        if not link or not link.startswith("https://"):
-            log("⚠️ Ссылка не найдена")
-            time.sleep(2)
-            continue
-
-        key = bypass_with_zen(link)
-        if not key:
-            log("❌ Ключ не получен от ZEN-API")
-            time.sleep(2)
-            continue
-
+        set_portrait()
         kill_all_roblox()
         time.sleep(2)
 
-        if inject_key(key):
-            state["last_key_time"] = time.time()
-            save_state()
-            emit("bypass.ok", key=key[:14] + "…", attempt=attempt)
-            log("💾 Таймер байпаса обновлён")
-            return True
+        if not key:
+            log("❌ Ключ не получен, повтор...")
+            time.sleep(5)
+            return None
 
-    emit("bypass.fail", retries=MAX_RETRIES)
+        return key
+    except SystemExit:
+        # фарм ⏹ (SIGTERM): вернуть портрет и выйти — телефон остаётся чистым
+        set_portrait()
+        raise
+
+
+def run_bypass_cycle():
+    """🚀 Цикл байпаса v18.8: 6 обычных + 3 с двойным кликом = 9 попыток."""
+    total = BYPASS_CLICK_RETRIES + BYPASS_DBLCLICK_RETRIES
+    emit("bypass.start", attempts=total)
+    log(f"🚀 ЦИКЛ БАЙПАСА: {BYPASS_CLICK_RETRIES} обычных + {BYPASS_DBLCLICK_RETRIES} двойных = {total} попыток")
+
+    for i in range(1, BYPASS_CLICK_RETRIES + 1):
+        key = run_bypass_attempt(i, total, use_double_click=False)
+        if key:
+            if inject_key(key):
+                state["last_key_time"] = time.time()
+                save_state()
+                emit("bypass.ok", key=key[:14] + "…", attempt=i, mode="click")
+                log("💾 Таймер байпаса обновлён")
+                return True
+            log("⚠️ Ключ НЕ записан в license — попытка не засчитана")
+
+    for i in range(1, BYPASS_DBLCLICK_RETRIES + 1):
+        key = run_bypass_attempt(BYPASS_CLICK_RETRIES + i, total, use_double_click=True)
+        if key:
+            if inject_key(key):
+                state["last_key_time"] = time.time()
+                save_state()
+                emit("bypass.ok", key=key[:14] + "…", attempt=BYPASS_CLICK_RETRIES + i, mode="dblclick")
+                log("💾 Таймер байпаса обновлён")
+                return True
+            log("⚠️ Ключ НЕ записан в license — попытка не засчитана")
+
+    log(f"💥 Все {total} попыток байпасса провалены")
+    set_portrait()
+    kill_all_roblox()
+    emit("bypass.fail", retries=total)
     return False
 
 
@@ -970,13 +1432,13 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm v16.2 SERVICE START (services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
     log(f"📁 Delta License: {DELTA_LICENSE_PATH}")
     log(f"💾 State: {STATE_FILE}")
-    log(f"⏱️ Фарм: {FARM_CYCLE_SECONDS//60} мин | Байпас: {'каждый цикл' if FORCE_BYPASS else '1 раз в 24ч'}")
+    log(f"⏱️ Фарм: {FARM_CYCLE_SECONDS//60} мин | Байпас: {'каждый цикл' if FORCE_BYPASS else '1 раз в 24ч'} ({BYPASS_CLICK_RETRIES}+{BYPASS_DBLCLICK_RETRIES} попыток)")
     log(f"🔍 Мониторинг фермы: каждые {FARM_CHECK_INTERVAL} сек")
     log(f"⏳ Задержка перед запуском: {FARM_PRELAUNCH_DELAY} сек")
     log(f"🔄 Задержка перед перезапуском: {FARM_RESTART_DELAY} сек")
