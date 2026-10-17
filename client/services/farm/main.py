@@ -20,6 +20,11 @@ stdout уходит в logs/services/farm.log.
     Клиент читает их (outbox) и доставляет на сервер → SQLite. Фарм про сервер
     по-прежнему НЕ знает: только файл, принцип «один файл — один писатель».
 
+v0.9 (чистая остановка):
+- ✅ Остановка фарма (farm ⏹ / полный стоп / Ctrl+C) закрывает ВСЕ роблоксы
+    (com.roblox*) и браузеры, которые фарм сам открывает при байпасе.
+    Телефон после остановки остаётся чистым, события farm.stop несёт closed=N.
+
 v16.2 (оригинал):
 - ✅ ВСЕГДА перезаписывает /storage/emulated/0/Delta/Autoexecute/1.lua при запуске
 - ✅ Прямой запрос к ZEN-API
@@ -143,11 +148,22 @@ def save_state():
         log(f"⚠️ save_state: {e}")
 
 
-def _sigterm(signum, frame):
-    """Корректная остановка: farm ⏹ / полный стоп / рестарт сервиса."""
-    log("🛑 SIGTERM: сохраняю state и выхожу...")
-    emit("farm.stop")
+def graceful_stop(reason: str):
+    """Единый выход: state → зачистка роблоксов → событие farm.stop (closed=N)."""
     save_state()
+    try:
+        closed = shutdown_kill_roblox()
+    except Exception as e:
+        log(f"⚠️ зачистка роблоксов: {e}")
+        closed = -1
+    emit("farm.stop", closed=closed, reason=reason)
+
+
+def _sigterm(signum, frame):
+    """Корректная остановка: farm ⏹ / полный стоп / рестарт сервиса.
+    При остановке закрываем все роблоксы — телефон остаётся чистым."""
+    log("🛑 SIGTERM: сохраняю state, закрываю роблоксы, выхожу...")
+    graceful_stop("sigterm")
     sys.exit(0)
 
 
@@ -236,19 +252,43 @@ def create_delta_lua():
 # 📱 УПРАВЛЕНИЕ ПАКЕТАМИ
 # ==========================================
 
+def _list_roblox_packages():
+    """Все пакеты com.roblox* (основной + клоны)"""
+    ok, out, _ = run_su("pm list packages com.roblox", timeout=10)
+    if not ok:
+        return []
+    return [line.split(":")[1] for line in out.splitlines() if line.startswith("package:")]
+
+
 def kill_all_roblox():
     log("🛑 Убиваю ВСЕ процессы Roblox...")
-    killed = 0
-    ok, out, _ = run_su("pm list packages com.roblox", timeout=10)
-    if ok:
-        pkgs = [line.split(":")[1] for line in out.splitlines() if line.startswith("package:")]
-        for pkg in pkgs:
-            run_su(f"am force-stop {pkg}", timeout=5)
-            killed += 1
+    pkgs = _list_roblox_packages()
+    for pkg in pkgs:
+        run_su(f"am force-stop {pkg}", timeout=5)
     run_su("am force-stop com.android.chrome", timeout=5)
     run_su("am force-stop com.android.browser", timeout=5)
-    log(f"   ✅ Остановлено: {killed} пакетов")
+    log(f"   ✅ Остановлено: {len(pkgs)} пакетов")
     time.sleep(2)
+
+
+def shutdown_kill_roblox(deadline_s=15):
+    """🧹 Остановка фарма = чистый телефон: закрываем ВСЕ роблоксы и браузеры
+    (браузер фарм сам открывает при байпасе). Быстрая версия без паузы в конце:
+    ProcessManager даёт ~25с до SIGKILL — дедлайн держим 15с."""
+    log("🧹 Остановка фарма: закрываю все роблоксы...")
+    closed = 0
+    deadline = time.time() + deadline_s
+    for pkg in _list_roblox_packages():
+        if time.time() >= deadline:
+            log("⏰ Дедлайн зачистки — выхожу как есть")
+            break
+        run_su(f"am force-stop {pkg}", timeout=5)
+        closed += 1
+    if time.time() < deadline:
+        run_su("am force-stop com.android.chrome", timeout=5)
+        run_su("am force-stop com.android.browser", timeout=5)
+    log(f"   ✅ Закрыто роблоксов: {closed}")
+    return closed
 
 
 def launch_delta():
@@ -259,11 +299,7 @@ def launch_delta():
 
 def get_farm_packages():
     """Возвращает список пакетов-клонов для фарма (кроме основного), максимум 4"""
-    ok, out, _ = run_su("pm list packages com.roblox", timeout=10)
-    if not ok:
-        return []
-    pkgs = [line.split(":")[1] for line in out.splitlines() if line.startswith("package:")]
-    farm_pkgs = [pkg for pkg in pkgs if pkg != PACKAGE_MAIN]
+    farm_pkgs = [pkg for pkg in _list_roblox_packages() if pkg != PACKAGE_MAIN]
     return farm_pkgs[:4]
 
 
@@ -662,8 +698,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         log("🛑 Остановлено пользователем")
-        emit("farm.stop", reason="keyboard")
-        save_state()
+        graceful_stop("keyboard")
     except SystemExit:
         raise
     except Exception as e:

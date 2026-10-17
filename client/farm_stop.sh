@@ -18,5 +18,14 @@ pkill -f 'supervisor[.]sh' 2>/dev/null
 sleep 2
 pkill -9 -f 'farm/main[.]py' 2>/dev/null
 
+# 4. закрыть все роблоксы (фарм уже мёртв — дочищаем за ним)
+echo "🧹 Закрываю все роблоксы..."
+for p in $(su -c "pm list packages com.roblox" 2>/dev/null | sed 's/^package://' | tr -d '\r'); do
+  su -c "am force-stop $p" 2>/dev/null
+done
+su -c "am force-stop com.android.chrome" 2>/dev/null
+su -c "am force-stop com.android.browser" 2>/dev/null
+echo "🧹 Роблоксы закрыты."
+
 echo "🛑 Остановлено: клиент + supervisor + root-страж."
 echo "▶ Снова запустить: sh ~/farm/farm_start.sh"

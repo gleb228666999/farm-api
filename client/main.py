@@ -13,6 +13,9 @@
         info/farm_events.jsonl, шлёт на сервер по events_ack, дубликаты
         отсекает сервер по id) + возраст ключа в heartbeat (farm_state.json);
         группы устройств — на стороне сервера/дашборда, клиенту не нужно
+- v0.9: чистая остановка фарма — при farm ⏹ фарм сам закрывает ВСЕ роблоксы
+        (com.roblox*) и браузеры до выхода; PM.stop фарма ждёт до 25с (было 10с —
+        зачистка не успевала бы); farm_stop.sh (полный стоп) тоже дочищает роблоксы
 """
 import sys
 import os
@@ -40,7 +43,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.8"
+VERSION = "0.9"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -227,9 +230,15 @@ def task_update(payload: dict) -> dict:
             "restart_needed": bool(changed)}
 
 
+def _stop_service(payload: dict) -> dict:
+    name = payload.get("name", "")
+    # фарм при остановке ещё и закрывает все роблоксы — даём ему время (15с зачистка)
+    return PM.stop(name, timeout=25 if name == "farm" else 10)
+
+
 TASKS_SYNC = {
     "service.start":  lambda p: PM.start(p.get("name", "")),
-    "service.stop":   lambda p: PM.stop(p.get("name", "")),
+    "service.stop":   _stop_service,
     "service.status": lambda p: PM.status(),
     "file.read":      task_file_read,
 }
