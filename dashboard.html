@@ -16,8 +16,17 @@ button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}butto
 .evrow{border-bottom:1px dotted #333;padding:2px 0}
 .ev-bypass.ok{color:#6f6}.ev-bypass\.fail{color:#f66}.ev-farm\.restart{color:#fa0}
 .ev-farm\.start,.ev-farm\.stop,.ev-farm\.crash{color:#fc6}
+.ev-harvest\.start,.ev-harvest\.end{color:#8f8}.ev-rega\.done{color:#6f6}
+.ev-rega\.fail,.ev-check\.fail{color:#f66}.ev-pool\.claim,.ev-pool\.push{color:#ff9}
+.ev-check\.replace{color:#8cf}.ev-rega\.start{color:#fc6}
 .panel{margin-top:10px;padding:8px 10px;border:1px solid #333;border-radius:6px;background:#181818}
 select{background:#222;color:#ddd;padding:4px 8px;border:1px solid #444;border-radius:4px}
+textarea{background:#111;color:#9f9;border:1px solid #444;border-radius:4px;width:100%;
+        font-family:monospace;font-size:.85em;box-sizing:border-box}
+input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px}
+.poolrow{display:flex;gap:6px;align-items:center;border-bottom:1px dotted #333;padding:2px 0;flex-wrap:wrap}
+.pbadge{border-radius:3px;padding:1px 5px;font-size:.78em}
+.pb-free{background:#253;color:#8f8}.pb-busy{background:#431;color:#fa0}.pb-arch{background:#243;color:#8cf}
 </style></head><body>
 <h1>🚜 Farm Dashboard</h1>
 <div class="mut" id="summary">загрузка...</div>
@@ -36,6 +45,30 @@ select{background:#222;color:#ddd;padding:4px 8px;border:1px solid #444;border-r
 <button class="u" onclick="groupAct('apk')">⬇ APK группе</button>
 <button class="u" onclick="groupAct('upd')">⬆ группе</button>
 <button class="b" onclick="groupAct('ping')">📢 ping группе</button>
+</div>
+
+<div class="panel">
+<b>🌾 Сбор + 🆕 Рега (расписание МСК)</b> <span class="mut" id="schedState"></span><br>
+<span class="mut">рега ежедневно в</span> <input class="tt" id="regaTime" size="5" value="03:00">
+<span class="mut">сбор в</span> <input class="tt" id="harvestTime" size="5" value="20:00">
+<span class="mut">пачка</span> <input class="tt" id="batchMin" size="3" value="20"> <span class="mut">мин (2 пачки)</span>
+<span class="mut">проверка кук каждые</span> <input class="tt" id="checkMin" size="3" value="30"> <span class="mut">мин</span>
+<span class="mut">приватка сбора (placeId, пусто = своя):</span> <input class="tt" id="hwPlace" size="12">
+<button class="b" onclick="saveSched()">💾 Сохранить расписание</button>
+<button onclick="regaNow()">🆕 Рега сейчас</button>
+<button onclick="harvestNow()">🌾 Сбор сейчас</button>
+<button onclick="cookieCheckAll()">🍪 Проверка кук (все фармеры)</button>
+<div class="mut" style="margin-top:4px">фармеры: device_id 0–29 (0-9 → collector-1, 10-19 → collector-2, 20-29 → collector-3) · сбор = 2 пачки по N мин (фармеры пополам) · рега = 4×10 попыток, паузы 15 мин, излишки → пул</div>
+</div>
+
+<div class="panel">
+<b>🍪 Пул кук</b> <span class="mut" id="poolCounts">—</span><br>
+<textarea id="poolText" rows="4" placeholder="nick: user123&#10;pass: Pass123&#10;.ROBLOSECURITY=_|WARNING:...&#10;— или просто куки построчно"></textarea>
+<button class="b" onclick="poolAdd()">➕ Добавить в пул</button>
+<button class="b" onclick="poolAddArchive()">➕ Сразу в архив</button>
+<button class="g" onclick="loadPool()">♻ Обновить</button>
+<div id="poolList" style="margin-top:6px;max-height:240px;overflow:auto"></div>
+<div class="mut">✖ удалить · ⬇ в архив (можно поднять позже) · ⬆ вернуть в пул</div>
 </div>
 
 <div style="margin-top:10px">
@@ -88,6 +121,7 @@ function farmOff(d){selected=d;run({type:'task',task:'service.stop',payload:{nam
 function farmLog(d){selected=d;run({type:'task',task:'file.read',payload:{path:'logs/services/farm.log',tail:3000}},'farm.log')}
 function farmState(d){selected=d;run({type:'task',task:'file.read',payload:{path:'info/farm_state.json',tail:500}},'farm_state.json')}
 function apk(d){selected=d;run({type:'task',task:'apk.update'},'⬇ APK установка/обновление',480000)}
+function cookieCheck(d){selected=d;run({type:'task',task:'cookie.check'},'🍪 проверка кук')}
 function exe(d){
   selected=d;
   const c=prompt('Shell-команда на '+d+':','');
@@ -228,6 +262,102 @@ async function apkAll(){
     +(j.sent||[]).map(s=>s.device_id+': '+s.task_id).join('\n')
     +'\n\nрезультат каждого: /api/results/<task_id>\nпри реальном обновлении телефон перезагрузится сам');
 }
+// ---------- ⏰ расписание (рега + сбор) ----------
+async function loadSched(){
+  try{
+    const j=await(await fetch('/api/schedule')).json();
+    const s=j.schedule||{};
+    $('regaTime').value=s.rega_time||'03:00';
+    $('harvestTime').value=s.harvest_time||'20:00';
+    $('batchMin').value=s.batch_minutes||20;
+    $('checkMin').value=s.cookie_check_interval_min||30;
+    $('hwPlace').value=s.harvest_place_id||'';
+    const st=j.state||{};
+    $('schedState').textContent='· последняя рега: '+(st.last_rega||'—')
+      +' · последний сбор: '+(st.last_harvest||'—')
+      +(st.rega_pending&&st.rega_pending.length?' · 🆕 рега идёт: '+st.rega_pending.join(','):'')
+      +' · фармеры онлайн: '+(j.farmers_online||[]).length+'/'+((j.farmers_online||[]).length+0)
+      +' · сборщики: '+(j.collectors_online||[]).length;
+  }catch(e){}
+}
+async function saveSched(){
+  const body={enabled:true,
+    rega_time:$('regaTime').value.trim(),
+    harvest_time:$('harvestTime').value.trim(),
+    batch_minutes:parseInt($('batchMin').value)||20,
+    cookie_check_interval_min:parseInt($('checkMin').value)||30,
+    harvest_place_id:$('hwPlace').value.trim()};
+  const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)});
+  show(r.ok?'⏰ расписание сохранено:\n'+JSON.stringify(await r.json(),null,2):'❌ '+await r.text());
+  loadSched();
+}
+async function regaNow(){
+  if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → рега (до 40 попыток) → фарм сам вернётся'))return;
+  const r=await fetch('/api/rega/start',{method:'POST'});
+  show('🆕 '+JSON.stringify(await r.json(),null,2));
+}
+async function harvestNow(){
+  if(!confirm('Запустить СБОР УРОЖАЯ сейчас?\n2 пачки по '+$('batchMin').value+' мин (фармеры пополам) + сборщики'))return;
+  const r=await fetch('/api/harvest/start',{method:'POST'});
+  show('🌾 '+JSON.stringify(await r.json(),null,2));
+}
+async function cookieCheckAll(){
+  const r=await fetch('/api/cookie/check',{method:'POST'});
+  const j=await r.json();
+  show('🍪 проверка кук запущена на: '+((j.sent||[]).join(', ')||'— (нет фармеров онлайн)'));
+}
+// ---------- 🍪 пул кук ----------
+let POOL={pool:[],archive:[]};
+function pbBadge(e,isArch){
+  if(isArch)return'<span class="pbadge pb-arch">архив</span>';
+  const busy=e.claimed_by&&e.claimed_ts&&(Date.now()/1000-e.claimed_ts<2700);
+  return busy?'<span class="pbadge pb-busy">🔒 '+e.claimed_by+'</span>'
+             :'<span class="pbadge pb-free">свободна</span>';
+}
+async function loadPool(){
+  try{
+    const j=await(await fetch('/api/pool')).json();
+    POOL=j;
+    const c=j.counts||{};
+    $('poolCounts').textContent='· в пуле: '+((c.pool||{}).total||0)
+      +' (свободно '+((c.pool||{}).free||0)+', в работе '+((c.pool||{}).busy||0)+')'
+      +' · в архиве: '+((c.archive||{}).total||0);
+    const row=(e,isArch)=>`<div class="poolrow">
+      <span class="mut">#${e.id}</span> <b>${e.nick||'?'}</b>
+      ${pbBadge(e,isArch)}
+      <span class="mut">${(e.cookie||'').slice(0,28)}… · ${e.source||''} · ${e.added_ts?new Date(e.added_ts*1000).toLocaleDateString('ru-RU'):''}</span>
+      <button class="r" onclick="poolDel(${e.id})">✖</button>
+      ${isArch?`<button class="b" onclick="poolMove(${e.id},'pool')">⬆ в пул</button>`
+              :`<button class="g" onclick="poolMove(${e.id},'archive')">⬇ в архив</button>`}
+      </div>`;
+    $('poolList').innerHTML='<b>Пул</b>'+(j.pool||[]).map(e=>row(e,false)).join('')
+      +'<b style="display:block;margin-top:6px">Архив</b>'+(j.archive||[]).map(e=>row(e,true)).join('')
+      ||'<span class="mut">пусто</span>';
+  }catch(e){$('poolCounts').textContent='сервер недоступен'}
+}
+async function poolAddTo(toArchive){
+  const text=$('poolText').value.trim();
+  if(!text){show('❌ вставь куки в поле (nick:/pass:/.ROBLOSECURITY=... или токены построчно)');return}
+  const r=await fetch('/api/pool/add',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text,to:toArchive?'archive':'pool'})});
+  const j=await r.json();
+  show(r.ok?'🍪 добавлено: '+j.added+'\n'+JSON.stringify(j.counts,null,2):'❌ '+await r.text());
+  if(r.ok){$('poolText').value='';loadPool()}
+}
+function poolAdd(){poolAddTo(false)}
+function poolAddArchive(){poolAddTo(true)}
+async function poolDel(id){
+  if(!confirm('Удалить куку #'+id+' НАСОВСЕМ?'))return;
+  await fetch('/api/pool/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ids:[id]})});
+  loadPool();
+}
+async function poolMove(id,to){
+  await fetch('/api/pool/move',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ids:[id],to:to})});
+  loadPool();
+}
 function chk(id,on){on?checked.add(id):checked.delete(id)}
 async function refresh(){
   try{
@@ -255,6 +385,7 @@ async function refresh(){
             <button class="r" onclick="farmOff('${d.device_id}')">farm ⏹</button>
             <button class="b" onclick="farmLog('${d.device_id}')">farm.log</button>
             <button class="b" onclick="farmState('${d.device_id}')">state</button>
+            <button class="b" onclick="cookieCheck('${d.device_id}')">🍪</button>
             <button class="b" onclick="ev('${d.device_id}')">📅</button>
             <button class="u" onclick="apk('${d.device_id}')">⬇ APK</button>
             <button class="u" onclick="upd('${d.device_id}')">⬆</button></td></tr>`;
@@ -262,4 +393,5 @@ async function refresh(){
   }catch(e){$('summary').textContent='сервер недоступен'}
 }
 setInterval(refresh,3000);refresh();loadGroups();setInterval(loadGroups,15000);
+loadSched();setInterval(loadSched,15000);loadPool();setInterval(loadPool,20000);
 </script></body></html>

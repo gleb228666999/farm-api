@@ -16,6 +16,12 @@
 - v0.9: чистая остановка фарма — при farm ⏹ фарм сам закрывает ВСЕ роблоксы
         (com.roblox*) и браузеры до выхода; PM.stop фарма ждёт до 25с (было 10с —
         зачистка не успевала бы); farm_stop.sh (полный стоп) тоже дочищает роблоксы
+- v0.10: ФАРМ + СБОР УРОЖАЯ + РЕГА: задачи rega.start (сервис рега:
+        авторегистрация по принципам v18.8, пул кук НА СЕРВЕРЕ),
+        harvest.start/stop (окно сбора info/harvest_window.json — фарм заходит
+        в приватки на время окна), cookie.check (проверка кук, вылетела —
+        замена из пула сервера, если пуст — из архива). Исходящие события:
+        farm_events.jsonl + rega_events.jsonl
 """
 import sys
 import os
@@ -43,7 +49,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.9"
+VERSION = "0.10"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -236,11 +242,59 @@ def _stop_service(payload: dict) -> dict:
     return PM.stop(name, timeout=25 if name == "farm" else 10)
 
 
+# ---------- 🌾 СБОР УРОЖАЯ: окно для фарма (клиент пишет, фарм читает) ----------
+
+def task_harvest_start(payload: dict) -> dict:
+    minutes = max(1, min(int(payload.get("minutes") or 20), 180))
+    data = {"until_ts": round(time.time() + minutes * 60, 1),
+            "place_id": str(payload.get("place_id") or ""),
+            "set_ts": round(time.time(), 1)}
+    f = BASE / "info" / "harvest_window.json"
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(f)                                   # атомарно
+    log(f"🌾 Окно сбора: {minutes} мин (until {data['until_ts']})")
+    return {"ok": True, **data}
+
+
+def task_harvest_stop(payload: dict) -> dict:
+    f = BASE / "info" / "harvest_window.json"
+    try:
+        f.unlink()
+    except FileNotFoundError:
+        pass
+    log("🌾 Окно сбора снято")
+    return {"ok": True, "note": "фарм вернётся к обычному циклу ≤30с"}
+
+
+def task_rega_start(payload: dict) -> dict:
+    """Полная авторегистрация (сервис rega, сам поднимет фарм по завершении)."""
+    r = PM.start("rega")
+    if r.get("ok"):
+        return {"ok": True, "note": "рега запущена (farm ⏹ уже сделан сервером)", **r}
+    return r
+
+
+def task_cookie_check(payload: dict) -> dict:
+    """Быстрая проверка кук (rega check) — в фоне, результат придёт событиями."""
+    log("🍪 cookie.check: запускаю services/rega/main.py check")
+    subprocess.Popen(
+        [sys.executable, str(BASE / "services" / "rega" / "main.py"), "check"],
+        cwd=str(BASE), env=ENV, start_new_session=True,
+        stdout=open(BASE / "logs" / "services" / "rega_check.log", "ab"),
+        stderr=subprocess.STDOUT)
+    return {"ok": True, "note": "проверка запущена в фоне, события придут в 📅"}
+
+
 TASKS_SYNC = {
     "service.start":  lambda p: PM.start(p.get("name", "")),
     "service.stop":   _stop_service,
     "service.status": lambda p: PM.status(),
     "file.read":      task_file_read,
+    "harvest.start":  task_harvest_start,
+    "harvest.stop":   task_harvest_stop,
+    "rega.start":     task_rega_start,
+    "cookie.check":   task_cookie_check,
 }
 
 

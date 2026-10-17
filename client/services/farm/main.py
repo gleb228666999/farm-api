@@ -84,6 +84,8 @@ STATE_FILE = FARM_BASE / "info" / "farm_state.json"  # состояние пер
 EVENTS_FILE = FARM_BASE / "info" / "farm_events.jsonl"  # события фарма (этап 2)
 EVENTS_MAX_BYTES = 512 * 1024   # ротация: файл разросся → оставляем хвост
 EVENTS_KEEP = 300               # сколько последних событий переживает ротацию
+# 🌾 окно сбора урожая: пишет КЛИЕНТ (задача harvest.start с сервера), фарм ТОЛЬКО читает
+HARVEST_WINDOW_FILE = FARM_BASE / "info" / "harvest_window.json"
 
 state = {"last_key_time": 0.0}
 
@@ -199,6 +201,25 @@ def emit(etype, **info):
 
 
 # ==========================================
+# 🌾 СБОР УРОЖАЯ (окно пишет клиент, фарм читает)
+# ==========================================
+# Сервер в 20:00 МСК шлёт harvest.start → клиент пишет info/harvest_window.json
+# {until_ts, place_id}. Фарм в цикле/мониторинге видит окно → входит в приватки
+# на время окна (2 пачки × 20 мин задаёт сервер). harvest.stop → клиент удаляет файл.
+
+def harvest_window():
+    """Активное окно сбора или None (нет/истекло/снято)."""
+    try:
+        hw = json.loads(HARVEST_WINDOW_FILE.read_text())
+        until = float(hw.get("until_ts") or 0)
+        if time.time() >= until:
+            return None
+        return {"until_ts": until, "place_id": str(hw.get("place_id") or "")}
+    except Exception:
+        return None
+
+
+# ==========================================
 # 📝 DELTA LUA
 # ==========================================
 
@@ -303,8 +324,9 @@ def get_farm_packages():
     return farm_pkgs[:4]
 
 
-def launch_roblox_light_farm():
+def launch_roblox_light_farm(place=None):
     log("🚜 Запускаю ферму (Ожидание 15 сек -> Прямой запуск в плейс)...")
+    place = place or PLACE_ID
     farm_pkgs = get_farm_packages()
     if not farm_pkgs:
         log("⚠️ Нет пакетов для фарма")
@@ -315,8 +337,8 @@ def launch_roblox_light_farm():
         log(f"⏳ Ожидание {FARM_PRELAUNCH_DELAY} секунд перед запуском {pkg}...")
         time.sleep(FARM_PRELAUNCH_DELAY)
 
-        deep_link = f"'roblox://experiences/start?placeId={PLACE_ID}'"
-        log(f"🚀 Прямой запуск в плейс {PLACE_ID} для {pkg}...")
+        deep_link = f"'roblox://experiences/start?placeId={place}'"
+        log(f"🚀 Прямой запуск в плейс {place} для {pkg}...")
         run_su(f"am start -a android.intent.action.VIEW -d {deep_link} {pkg}", timeout=5)
 
         launched += 1
@@ -406,8 +428,9 @@ def is_pkg_visible(pkg, win_out, act_out):
     return False
 
 
-def restart_pkg(pkg):
+def restart_pkg(pkg, place=None):
     """🔄 Принудительно останавливает пакет, ждет 15 сек и запускает его снова в плейс"""
+    place = place or PLACE_ID
     emit("farm.restart", pkg=pkg)
     log(f"⚠️ Окно {pkg} не видно → останавливаю пакет...")
     run_su(f"am force-stop {pkg}", timeout=5)
@@ -415,17 +438,24 @@ def restart_pkg(pkg):
     log(f"⏳ Ожидание {FARM_RESTART_DELAY} секунд перед перезапуском {pkg}...")
     time.sleep(FARM_RESTART_DELAY)
 
-    deep_link = f"'roblox://experiences/start?placeId={PLACE_ID}'"
-    log(f"🚀 Повторный запуск {pkg} в плейс {PLACE_ID}...")
+    deep_link = f"'roblox://experiences/start?placeId={place}'"
+    log(f"🚀 Повторный запуск {pkg} в плейс {place}...")
     run_su(f"am start -a android.intent.action.VIEW -d {deep_link} {pkg}", timeout=5)
 
 
-def monitor_farm(duration, farm_pkgs):
+def monitor_farm(duration, farm_pkgs, harvest=False):
     """👁 Мониторинг фермы: каждые FARM_CHECK_INTERVAL секунд проверяет видимость окон.
-    Одна компактная строка на проверку (ротации логов нет) + отдельные строки на перезапуски."""
+    Одна компактная строка на проверку (ротации логов нет) + отдельные строки на перезапуски.
+    harvest=True — это мониторинг СБОРА: выходим, когда окно сбора исчезло.
+    harvest=False — обычный фарм: выходим, когда окно сбора ПОЯВИЛОСЬ (20:00 МСК)."""
     if not farm_pkgs:
         log("⚠️ Нет пакетов для мониторинга, просто ждём...")
-        time.sleep(duration)
+        # даже без пакетов ждём с проверкой окна сбора
+        end0 = time.time() + duration
+        while time.time() < end0:
+            if (harvest_window() is not None) != harvest:
+                return
+            time.sleep(min(FARM_CHECK_INTERVAL, max(0, end0 - time.time())))
         return
 
     log(f"👁 Мониторинг {len(farm_pkgs)} пакетов каждые {FARM_CHECK_INTERVAL} сек...")
@@ -440,6 +470,12 @@ def monitor_farm(duration, farm_pkgs):
 
         if time.time() >= end_time:
             break
+
+        # 🌾 окно сбора появилось (обычный фарм) или исчезло (сбор) → выходим,
+        # вызывающий код сам переключится на сбор / вернётся к фарму
+        if (harvest_window() is not None) != harvest:
+            log("🌾 Изменение окна сбора — переключаю режим")
+            return
 
         log("🔍 Проверка видимости окон фермы...")
         win_out, act_out = get_visibility_snapshots()
@@ -459,7 +495,23 @@ def monitor_farm(duration, farm_pkgs):
                 statuses.append(f"{pkg.split('.')[-1]}✅")
 
         remaining = max(0, end_time - time.time())
-        log(f"👁 до конца фарма {remaining/60:.0f} мин: " + " ".join(statuses))
+        log(f"👁 до конца {remaining/60:.0f} мин: " + " ".join(statuses))
+
+
+def run_harvest_session(hw):
+    """🌾 СБОР УРОЖАЯ: на время окна заходим в приватки (плейс из окна),
+    мониторим как фарм. После окна — kill, фарм сам продолжит обычный цикл."""
+    until = float(hw.get("until_ts") or 0)
+    place = hw.get("place_id") or PLACE_ID
+    minutes = max(1, int((until - time.time()) // 60))
+    log(f"🌾 СБОР УРОЖАЯ: {minutes} мин в приватке {place}")
+    emit("harvest.start", minutes=minutes, place=place)
+    kill_all_roblox()
+    farm_pkgs = launch_roblox_light_farm(place=place)
+    monitor_farm(max(60, until - time.time()), farm_pkgs, harvest=True)
+    emit("harvest.end")
+    log("🌾 Сбор завершён — закрываю роблоксы, возвращаюсь к фарму")
+    kill_all_roblox()
 
 
 # ==========================================
@@ -676,6 +728,17 @@ def main():
          last_key_age_h=round((time.time() - state.get("last_key_time", 0)) / 3600, 1))
 
     while True:
+        # 🌾 ОКНО СБОРА: сервер назначил (20:00 МСК) — сначала сбор
+        hw = harvest_window()
+        if hw:
+            try:
+                run_harvest_session(hw)
+            except Exception as e:
+                log(f"💥 Сбор упал: {e}")
+                emit("harvest.fail", error=str(e)[:200])
+                kill_all_roblox()
+            continue
+
         now = time.time()
         elapsed = now - state["last_key_time"]
 

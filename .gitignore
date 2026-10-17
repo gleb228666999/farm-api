@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 info/
 logs/
+schedule.json
+schedule_state.json

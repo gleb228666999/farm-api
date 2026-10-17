@@ -10,5 +10,11 @@
     "command": "python services/farm/main.py",
     "autostart": false,
     "restart": true
+  },
+  "rega": {
+    "type": "daemon",
+    "command": "python services/rega/main.py",
+    "autostart": false,
+    "restart": false
   }
 }
