@@ -1443,8 +1443,9 @@ def phase_registration_and_login(target):
     archive_and_clear_cookies("перед стартом новой сессии")
     soft_logout_all()
     if stop_requested():
+        # фарм ⏹ (полный стоп, v0.13): остановленной реге реармить фарм НЕЛЬЗЯ,
+        # иначе остановленный фарм сам поднимется. Реармит только завершение/падение.
         emit("rega.stop", phase="before_reg")
-        rearm_farm()
         return
 
     kept = []
@@ -1453,8 +1454,8 @@ def phase_registration_and_login(target):
     except Exception as e:
         log(f"💥 Рега упала целиком: {e} → спасаю куки из файлов")
     if stop_requested():
+        # фарм ⏹ (полный стоп) — см. before_reg: реарма нет
         emit("rega.stop", phase="after_reg")
-        rearm_farm()
         return
 
     merged = {}
@@ -1543,6 +1544,10 @@ def phase_registration_and_login(target):
         state["last_reg_date"] = datetime.now().strftime("%Y-%m-%d")
     save_state()
     ui_cache_clear()
+    if stop_requested():
+        # фарм ⏹ добил регу на финише — rega.stop, БЕЗ реарма фарм
+        emit("rega.stop", phase="before_done")
+        return
     sessions = total_sessions()
     log(f"🏁 Реги завершена: сессий {sessions}")
     emit("rega.done", accounts=len(all_accs), farm=len(farm_accs),

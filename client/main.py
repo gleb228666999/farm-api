@@ -28,6 +28,10 @@
 - v0.12: (в сервисах) куки-гейт v2 — гейт смотрит на обе части фермы:
         нет куки на Дельте (байпас не работает) ИЛИ все клоны пустые
         (фармить нечем) → сначала рега; частичная убыль кук регу не поднимает
+- v0.13: (в сервисах) ПОЛНЫЙ стоп — farm ⏹ глушит и регу (SIGTERM → 8с →
+        SIGKILL + чистка pid-файла); рега при остановке шлёт rega.stop и больше
+        НЕ реармит фарм (остановленный фарм больше не встаёт сам); гейт ждёт
+        освобождения flock-лока, если спавн рега упал с кодом 99
 """
 import sys
 import os
@@ -55,7 +59,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.12"
+VERSION = "0.13"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 

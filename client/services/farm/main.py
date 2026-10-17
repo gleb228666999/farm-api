@@ -41,6 +41,15 @@ v0.12 (куки-гейт v2 — клоны):
     на том, что есть, а починку делают check (пул/архив, каждые 30 мин)
     и ежедневная рега в 03:00. Так сломанный клон не гоняет регу по кругу.
 
+v0.13 (полный стоп):
+- ✅ farm ⏹ — теперь ПОЛНЫЙ стоп: глушит и регу (services/rega, включая check):
+    SIGTERM → 8с на мягкий выход → SIGKILL + чистка pid-файла. Раньше фарм
+    глох, а рега продолжала работать и после завершения ещё и поднимала фарм.
+- ✅ Рега при принудительной остановке шлёт rega.stop и БОЛЬШЕ НЕ реармит фарм
+    (реармит только завершение/падение) — farm ⏹ больше не отменяется сам.
+- ✅ Гейт: если спавн рега вышел с кодом 99 (лок держит другая рега/check) —
+    фарм ждёт освобождения лока (flock-проба) и пробует ещё раз.
+
 v16.2 (оригинал):
 - ✅ ВСЕГДА перезаписывает /storage/emulated/0/Delta/Autoexecute/1.lua при запуске
 - ✅ Прямой запрос к ZEN-API
@@ -60,6 +69,7 @@ import time
 import re
 import shutil
 import signal
+import fcntl
 import sqlite3
 import subprocess
 import urllib.request
@@ -168,14 +178,28 @@ def save_state():
 
 
 def graceful_stop(reason: str):
-    """Единый выход: state → зачистка роблоксов → событие farm.stop (closed=N)."""
+    """Единый выход (v0.13 — ПОЛНЫЙ стоп): state → глушим регу → зачистка
+    роблоксов → контрольный добой рега → событие farm.stop.
+    Бюджет: рега ≤8с + роблоксы ≤15с = ≤23с — влезает в PM.stop timeout 25с."""
     save_state()
+    rega_stopped = False
+    try:
+        rega_stopped = stop_rega()
+    except Exception as e:
+        log(f"⚠️ стоп рега: {e}")
     try:
         closed = shutdown_kill_roblox()
     except Exception as e:
         log(f"⚠️ зачистка роблоксов: {e}")
         closed = -1
-    emit("farm.stop", closed=closed, reason=reason)
+    try:
+        # контрольный добой: если рега пережила SIGTERM — SIGKILL (без ожидания)
+        if _rega_pid():
+            run_su("pkill -9 -f 'services/rega/main[.]py'", timeout=5)
+            rega_stopped = True
+    except Exception:
+        pass
+    emit("farm.stop", closed=closed, reason=reason, rega_stopped=rega_stopped)
 
 
 def _sigterm(signum, frame):
@@ -545,6 +569,7 @@ def run_harvest_session(hw):
 TERMUX_HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
 CHECK_DB = os.path.join(TERMUX_HOME, "Cookies_check.db")   # СВОЙ рабочий файл (не как у рега!)
 REGA_SCRIPT = FARM_BASE / "services" / "rega" / "main.py"
+REGA_LOCK = FARM_BASE / "info" / "rega.lock"     # тот же лок, что у рега-сервиса
 REGA_WAIT_MAX = 4 * 3600        # сколько ждём окончания рега
 REGA_RETRY_PAUSE = 30 * 60      # рега не дала кук → пауза перед новой попыткой
 
@@ -642,6 +667,59 @@ def _clear_rega_pid(pid):
         pass
 
 
+def _lock_busy():
+    """True — flock info/rega.lock кто-то держит (рега/check уже идёт).
+    Проба без записи: взяли → отпустили. Чужой лок не трогаем."""
+    try:
+        fd = os.open(str(REGA_LOCK), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
+    except OSError:
+        return True
+
+
+def stop_rega(timeout_s=8):
+    """🛑 Полный стоп: фарм ⏹ глушит и регу (services/rega, включая check).
+    SIGTERM (у рега мягкий хендлер) → ждём до timeout_s → SIGKILL + чистка
+    pid-файла. False — рега и не шла."""
+    pid = _rega_pid()
+    if not pid and not _lock_busy():
+        return False
+    log(f"🛑 Полный стоп: глушу регу{f' (pid {pid})' if pid else ''}...")
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    # — и махом по всем rega/main.py (в т.ч. check без pid-файла;
+    #   [.] не даёт pkill убить сам su-процесс)
+    run_su("pkill -TERM -f 'services/rega/main[.]py'", timeout=5)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not _rega_pid() and not _lock_busy():
+            log("   ✅ Рега остановлена")
+            if pid:
+                _clear_rega_pid(pid)
+            return True
+        time.sleep(0.5)
+    log("   ⚠️ Рега не вышла — добиваю SIGKILL")
+    if pid:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    run_su("pkill -9 -f 'services/rega/main[.]py'", timeout=5)
+    try:
+        (FARM_BASE / "info" / "pids" / "rega.pid").unlink(missing_ok=True)
+    except Exception:
+        pass
+    return True
+
+
 def handle_no_cookies(reason="нет кук"):
     """🍪 Кук нет (reason — почему) → сначала авторегистрация, потом байпас/фарм.
     Если рега уже идёт (запущена сервером/клиентом) — просто ждём её."""
@@ -649,14 +727,15 @@ def handle_no_cookies(reason="нет кук"):
     emit("farm.no_cookies", reason=reason[:120])
     kill_all_roblox()
 
-    pid = _rega_pid()
-    if pid:
-        log(f"🕒 Рега уже идёт (pid {pid}) — жду окончания...")
-        waited = 0
-        while _rega_pid() and waited < REGA_WAIT_MAX:
-            time.sleep(30)
-            waited += 30
-    else:
+    for attempt in (1, 2):
+        pid = _rega_pid()
+        if pid:
+            log(f"🕒 Рега уже идёт (pid {pid}) — жду окончания...")
+            waited = 0
+            while _rega_pid() and waited < REGA_WAIT_MAX:
+                time.sleep(30)
+                waited += 30
+            break
         log("🚀 Запускаю авторегистрацию (services/rega)...")
         (FARM_BASE / "logs" / "services").mkdir(parents=True, exist_ok=True)
         logf = open(FARM_BASE / "logs" / "services" / "rega.log", "ab")
@@ -675,7 +754,16 @@ def handle_no_cookies(reason="нет кук"):
             time.sleep(10)
             waited += 10
         _clear_rega_pid(proc.pid)
+        if proc.returncode == 99 and attempt == 1:
+            # лок держит другая рега/check — ждём освобождения и спавним ещё раз
+            log("🔒 Лок рега занят другой регой/check — жду освобождения...")
+            waited = 0
+            while _lock_busy() and waited < REGA_WAIT_MAX:
+                time.sleep(30)
+                waited += 30
+            continue
         log(f"🏁 Рега завершилась (ждал {waited // 60} мин)")
+        break
 
     # тот же гейт, что и в main(): рега обязана закрыть ОБЕ части фермы
     try:
