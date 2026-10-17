@@ -25,6 +25,9 @@
 - v0.11: (в сервисах) куки-гейт — фарм не делает байпас/фарм без кук:
         0 сессий → сам запускает авторегистрацию (rega, flock от двойного
         запуска) и ждёт; рега не дала кук — пауза 30 мин и снова
+- v0.12: (в сервисах) куки-гейт v2 — гейт смотрит на обе части фермы:
+        нет куки на Дельте (байпас не работает) ИЛИ все клоны пустые
+        (фармить нечем) → сначала рега; частичная убыль кук регу не поднимает
 """
 import sys
 import os
@@ -52,7 +55,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.11"
+VERSION = "0.12"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
