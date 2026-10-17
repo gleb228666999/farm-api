@@ -1,5 +1,5 @@
 """
-🤖 Farm Client v0.7
+🤖 Farm Client v0.8
 - v0.4: связь, exec, сервисы, watchdog, update по воздуху
 - v0.5: неубиваемость по схеме v7.2: client.pid для supervisor/стража,
         selfheal (сам переустанавливает неубиваемость), halt/restart,
@@ -9,6 +9,10 @@
 - v0.7: APK-менеджер: задача apk.update — скачать и поставить APK из
         link-apps (github staffere228-alt/apk), при реальном обновлении
         версии — телефон перезагружается ПОСЛЕ отправки результата
+- v0.8: ЭТАПЫ 2+4 — события фарма (outbox: core/events.py читает
+        info/farm_events.jsonl, шлёт на сервер по events_ack, дубликаты
+        отсекает сервер по id) + возраст ключа в heartbeat (farm_state.json);
+        группы устройств — на стороне сервера/дашборда, клиенту не нужно
 """
 import sys
 import os
@@ -34,8 +38,9 @@ if not (BASE / "core" / "connection.py").exists() or not (BASE / "config.json").
 from core.connection import Connection
 from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
+from core.events import EventOutbox
 
-VERSION = "0.7"
+VERSION = "0.8"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -52,6 +57,7 @@ except Exception:
     pass
 
 PM = ProcessManager(BASE)
+OUTBOX = EventOutbox(BASE)   # события фарма → сервер (этап 2)
 
 _bg = set()
 def spawn(coro):
@@ -89,6 +95,14 @@ def get_device_info() -> dict:
         "model": sh("getprop ro.product.model"),
         "battery": get_battery(),
     }
+
+
+def get_farm_state() -> dict | None:
+    """farm_state.json пишет ТОЛЬКО фарм, клиент читает (для дашборда: возраст ключа)"""
+    try:
+        return json.loads((BASE / "info" / "farm_state.json").read_text())
+    except Exception:
+        return None
 
 
 # ==========================
@@ -299,8 +313,24 @@ async def heartbeat_loop(conn, interval):
             "device_id": CONFIG["device_id"],
             "battery": get_battery(),
             "uptime": round(time.time() - START),
+            "farm": get_farm_state(),      # last_key_time → дашборд: возраст ключа 🔑
         })
         await asyncio.sleep(interval)
+
+
+async def events_loop(conn):
+    """ЭТАП 2: доставка событий фарма (outbox). Отправка батча каждые 15с,
+    offset двигается ТОЛЬКО после events_ack от сервера."""
+    while True:
+        await asyncio.sleep(15)
+        try:
+            batch = await asyncio.to_thread(OUTBOX.pending, 50)
+            if not batch:
+                continue
+            await conn.send({"type": "events", "device_id": CONFIG["device_id"],
+                             "events": batch})
+        except Exception as e:
+            log(f"📤 events: {e}")   # offset не двигаем — батч уйдёт повторно
 
 
 async def watchdog_loop():
@@ -322,6 +352,8 @@ async def listen_loop(conn):
             log(f"👋 Сервер: online={msg.get('online')}")
         elif t == "heartbeat_ack":
             pass
+        elif t == "events_ack":
+            OUTBOX.commit(int(msg.get("accepted", 0)))
         elif t == "task":
             spawn(handle_task(conn, msg))
         else:
@@ -367,6 +399,7 @@ async def main():
                 asyncio.create_task(listen_loop(conn)),
                 asyncio.create_task(heartbeat_loop(conn, CONFIG["heartbeat_interval"])),
                 asyncio.create_task(watchdog_loop()),
+                asyncio.create_task(events_loop(conn)),
             ]
             done, pending = await asyncio.wait(tasks,
                                                return_when=asyncio.FIRST_EXCEPTION)

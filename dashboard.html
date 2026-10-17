@@ -7,27 +7,52 @@ table{border-collapse:collapse;width:100%;margin-top:12px}
 td,th{padding:8px 12px;border-bottom:1px solid #333;text-align:left;font-size:.95em}
 .on{color:#6f6}.off{color:#f66}
 button{background:#2a6;border:none;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer;margin:1px}
-button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}
+button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}button.g{background:#555}
 #out{background:#000;color:#9f9;padding:12px;border-radius:6px;margin-top:14px;
      white-space:pre-wrap;font-family:monospace;max-height:340px;overflow:auto;display:none}
 .mut{color:#888;font-size:.85em}.sel{background:#1c2b1c}
+.gbadge{background:#333;color:#fc6;border-radius:3px;padding:1px 5px;font-size:.78em;margin-left:4px}
+.chk{transform:scale(1.25);cursor:pointer}
+.evrow{border-bottom:1px dotted #333;padding:2px 0}
+.ev-bypass.ok{color:#6f6}.ev-bypass\.fail{color:#f66}.ev-farm\.restart{color:#fa0}
+.ev-farm\.start,.ev-farm\.stop,.ev-farm\.crash{color:#fc6}
+.panel{margin-top:10px;padding:8px 10px;border:1px solid #333;border-radius:6px;background:#181818}
+select{background:#222;color:#ddd;padding:4px 8px;border:1px solid #444;border-radius:4px}
 </style></head><body>
 <h1>🚜 Farm Dashboard</h1>
 <div class="mut" id="summary">загрузка...</div>
-<table><thead><tr><th>Устройство</th><th>Модель</th><th>Батарея</th>
-<th>Версия</th><th>Аптайм</th><th>Был</th><th>Действия</th></tr></thead>
+<table><thead><tr><th>гр</th><th>Устройство</th><th>Модель</th><th>Батарея</th>
+<th>🔑 ключ</th><th>Версия</th><th>Аптайм</th><th>Был</th><th>Действия</th></tr></thead>
 <tbody id="rows"></tbody></table>
-<div id="out"></div>
+
+<div class="panel">
+<b>👥 Группы</b> <span class="mut">(галочка «гр» у строки = выбрано)</span><br>
+<select id="groupSel" onchange="renderGroupInfo()"></select>
+<span id="groupInfo" class="mut"></span><br>
+<button class="b" onclick="saveGroup()">💾 Сохранить выбранные как группу</button>
+<button class="g" onclick="delGroup()">🗑 Удалить группу</button>
+<button onclick="groupAct('farmStart')">🚜 farm ▶ группе</button>
+<button class="r" onclick="groupAct('farmStop')">🚜 farm ⏹ группе</button>
+<button class="u" onclick="groupAct('apk')">⬇ APK группе</button>
+<button class="u" onclick="groupAct('upd')">⬆ группе</button>
+<button class="b" onclick="groupAct('ping')">📢 ping группе</button>
+</div>
+
 <div style="margin-top:10px">
 <button class="b" onclick="bcast()">📢 Ping всем</button>
 <button class="u" onclick="updAll()">⬆ Обновить всех</button>
 <button class="u" onclick="apkAll()">⬇ APK всем</button>
 <button onclick="bcastFarmStart()">🚜 farm ▶ всем</button>
 <button class="r" onclick="bcastFarmStop()">🚜 farm ⏹ всем</button>
+<button class="b" onclick="showEvents()">📅 События (все)</button>
+<button class="g" onclick="clearEvents()">📅 Очистить историю</button>
 </div>
-<div class="mut" style="margin-top:8px">клик по строке = выбрать устройство</div>
+<div class="mut" style="margin-top:8px">клик по строке = выбрать устройство · галочка «гр» = в группу</div>
+<div id="out"></div>
 <script>
 let selected=null;
+let GROUPS={};                    // имя -> [device_id]
+const checked=new Set();          // галочки «гр» (живут между обновлениями таблицы)
 const $=id=>document.getElementById(id);
 function show(t){$('out').style.display='block';$('out').textContent=t}
 async function sendTask(body){
@@ -68,6 +93,98 @@ function exe(d){
   const c=prompt('Shell-команда на '+d+':','');
   if(c)run({type:'task',task:'exec',payload:{command:c,timeout:30}},'$ '+c,35000);
 }
+function keyAge(d){
+  const f=d.info&&d.info.farm;
+  if(!f||!f.last_key_time)return'—';
+  const h=(Date.now()/1000-f.last_key_time)/3600;
+  if(h<0)return'новый';
+  if(h<24)return h.toFixed(1)+'ч';
+  return Math.round(h/24)+'д';
+}
+// ---------- 📅 события фарма (этап 2) ----------
+function fmtTs(ts){return new Date(ts*1000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function evText(j){
+  return '📅 событий: '+j.count+'\n\n'+j.events.map(e=>{
+    const inf=Object.entries(e.info||{}).map(([k,v])=>k+'='+v).join(' ');
+    return fmtTs(e.ts)+'  '+e.device_id+'  '+e.type+(inf?'  ('+inf+')':'');
+  }).join('\n');
+}
+async function showEventsFor(dev){
+  const r=await fetch('/api/events?limit=150&device_id='+encodeURIComponent(dev));
+  show('📅 события фарма: '+dev+'\n\n'+evText(await r.json()));
+}
+function ev(d){selected=d;showEventsFor(d)}
+async function showEvents(){
+  const r=await fetch('/api/events?limit=200');
+  show('📅 события фарма (все телефоны)\n\n'+evText(await r.json()));
+}
+async function clearEvents(){
+  if(!confirm('Очистить ВСЮ историю событий?'))return;
+  await fetch('/api/events',{method:'DELETE'});
+  show('🗑 история событий очищена');
+}
+// ---------- 👥 группы (этап 4) ----------
+async function loadGroups(){
+  try{
+    const j=await(await fetch('/api/groups')).json();
+    GROUPS={};
+    (j.groups||[]).forEach(g=>GROUPS[g.name]=g.devices);
+    const sel=$('groupSel'),cur=sel.value;
+    sel.innerHTML='<option value="">— выбери группу —</option>'+Object.keys(GROUPS).sort()
+      .map(n=>`<option value="${n}">${n} (${GROUPS[n].length})</option>`).join('');
+    if(cur&&GROUPS[cur])sel.value=cur;
+    renderGroupInfo();
+  }catch(e){}
+}
+function renderGroupInfo(){
+  const n=$('groupSel').value;
+  $('groupInfo').textContent=n?(' → '+GROUPS[n].join(', ')):'';
+}
+async function saveGroup(){
+  const devs=[...checked];
+  if(!devs.length){show('❌ поставь галочки «гр» на устройствах');return}
+  const name=prompt('Имя группы ('+devs.length+' шт.: '+devs.join(', ')+'):\n(существующее имя = замена состава)','');
+  if(!name)return;
+  const r=await fetch('/api/groups',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:name.trim(),devices:devs})});
+  if(!r.ok){show('❌ '+await r.text());return}
+  await loadGroups();$('groupSel').value=name.trim();renderGroupInfo();
+  show('💾 группа «'+name.trim()+'»: '+devs.join(', '));
+}
+async function delGroup(){
+  const n=$('groupSel').value;
+  if(!n){show('❌ выбери группу в списке');return}
+  if(!confirm('Удалить группу «'+n+'»? (телефоны не пострадают)'))return;
+  await fetch('/api/groups/'+encodeURIComponent(n),{method:'DELETE'});
+  await loadGroups();show('🗑 группа «'+n+'» удалена');
+}
+const GTASKS={farmStart:{task:'service.start',payload:{name:'farm'}},
+              farmStop:{task:'service.stop',payload:{name:'farm'}},
+              apk:{task:'apk.update'},ping:{task:'ping'}};
+const GLABEL={farmStart:'🚜 farm ▶',farmStop:'🚜 farm ⏹',apk:'⬇ APK',ping:'📢 ping',upd:'⬆ update'};
+async function groupAct(kind){
+  const n=$('groupSel').value,members=GROUPS[n]||[];
+  if(!n||!members.length){show('❌ выбери группу');return}
+  if(!confirm(GLABEL[kind]+' → группа «'+n+'» ('+members.length+' шт.)?\n'+members.join(', ')))return;
+  show('⏳ '+GLABEL[kind]+' → '+members.length+' устройств...');
+  const sent=[],offline=[];
+  for(const id of members){
+    try{
+      if(kind==='upd'){
+        const j=await(await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({device_id:id})})).json();
+        (j.sent&&j.sent.length)?sent.push(id):offline.push(id);
+      }else{
+        const r=await fetch(`/api/devices/${id}/send`,{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({type:'task',...GTASKS[kind]})});
+        r.ok?sent.push(id):offline.push(id);
+      }
+    }catch(e){offline.push(id)}
+  }
+  show(GLABEL[kind]+' группе «'+n+'»: '+sent.length+'/'+members.length+'\n\n'
+    +'✅ отправлено: '+(sent.join(', ')||'—')+'\n❌ офлайн: '+(offline.join(', ')||'—'));
+}
+// ---------- массовые ----------
 async function upd(d){
   selected=d;
   const j=await(await fetch('/api/update',{method:'POST',
@@ -111,17 +228,22 @@ async function apkAll(){
     +(j.sent||[]).map(s=>s.device_id+': '+s.task_id).join('\n')
     +'\n\nрезультат каждого: /api/results/<task_id>\nпри реальном обновлении телефон перезагрузится сам');
 }
+function chk(id,on){on?checked.add(id):checked.delete(id)}
 async function refresh(){
   try{
     const j=await(await fetch('/api/devices')).json();
-    $('summary').textContent='устройств: '+j.count+(selected?' | выбрано: '+selected:'');
+    $('summary').textContent='устройств: '+j.count+(selected?' | выбрано: '+selected:'')
+      +(checked.size?' | в группе: '+checked.size:'');
     $('rows').innerHTML=j.devices.map(d=>{
       const bat=(d.info&&d.info.battery!=null)?d.info.battery:'?';
       const model=(d.info&&d.info.model)?d.info.model:'?';
       const sel=selected===d.device_id?' class="sel"':'';
+      const gb=(d.groups||[]).map(g=>`<span class="gbadge">👥${g}</span>`).join('');
       return `<tr${sel} onclick="selected='${d.device_id}'">
-        <td>${d.device_id} ${d.online?'<span class="on">●</span>':'<span class="off">●</span>'}</td>
-        <td>${model}</td><td>${bat}%</td><td>${d.client_version||'?'}</td>
+        <td><input type="checkbox" class="chk" ${checked.has(d.device_id)?'checked':''}
+             onclick="event.stopPropagation()" onchange="chk('${d.device_id}',this.checked)"></td>
+        <td>${d.device_id} ${d.online?'<span class="on">●</span>':'<span class="off">●</span>'}${gb}</td>
+        <td>${model}</td><td>${bat}%</td><td>${keyAge(d)}</td><td>${d.client_version||'?'}</td>
         <td>${Math.round(d.uptime_sec/60)}м</td><td>${d.last_seen_sec}с</td>
         <td><button onclick="ping('${d.device_id}')">ping</button>
             <button class="b" onclick="exe('${d.device_id}')">exec</button>
@@ -133,10 +255,11 @@ async function refresh(){
             <button class="r" onclick="farmOff('${d.device_id}')">farm ⏹</button>
             <button class="b" onclick="farmLog('${d.device_id}')">farm.log</button>
             <button class="b" onclick="farmState('${d.device_id}')">state</button>
+            <button class="b" onclick="ev('${d.device_id}')">📅</button>
             <button class="u" onclick="apk('${d.device_id}')">⬇ APK</button>
             <button class="u" onclick="upd('${d.device_id}')">⬆</button></td></tr>`;
-    }).join('')||'<tr><td colspan="7" class="mut">нет устройств</td></tr>';
+    }).join('')||'<tr><td colspan="9" class="mut">нет устройств</td></tr>';
   }catch(e){$('summary').textContent='сервер недоступен'}
 }
-setInterval(refresh,3000);refresh();
+setInterval(refresh,3000);refresh();loadGroups();setInterval(loadGroups,15000);
 </script></body></html>

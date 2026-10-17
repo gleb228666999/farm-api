@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.3
-- /ws                      телефоны (hello, heartbeat, task, result)
+🚜 Farm Server v0.4
+- /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
 - /api/devices|send|broadcast|results|update
+- /api/events              события фарма из SQLite (этап 2)
+- /api/groups              группы устройств (этап 4) + send в группу
 - /                        дашборд (dashboard.html)
 """
 import json
@@ -12,6 +14,8 @@ import time
 import hashlib
 import secrets
 import asyncio
+import sqlite3
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -28,6 +32,66 @@ RESULTS_TTL = 3600
 
 devices: dict = {}   # device_id -> {"ws","queue","info","client_version","last_seen","connected_at"}
 results: dict = {}   # task_id   -> {"status","data","device_id","ts"}
+
+
+# ---------- SQLite (этапы 2+4) ----------
+
+DB_PATH = BASE_DIR / "farm.db"
+DB_LOCK = threading.Lock()
+
+
+def init_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS events(
+        id        TEXT PRIMARY KEY,   -- id события от телефона (защита от дублей)
+        device_id TEXT,
+        ts        REAL,               -- когда случилось (часы телефона)
+        type      TEXT,               -- farm.start/bypass.ok/farm.restart/...
+        info      TEXT,               -- JSON-детали
+        recv      REAL)               -- когда сервер получил""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_dev ON events(device_id, ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS groups(
+        name    TEXT PRIMARY KEY,
+        devices TEXT,                 -- JSON-список device_id
+        created REAL)""")
+    conn.commit()
+    return conn
+
+
+DB = init_db()
+
+
+def db_events_insert(device_id: str, events: list) -> int:
+    """INSERT OR IGNORE — дубликаты (повторная отправка батча) отсекаются по id."""
+    inserted = 0
+    with DB_LOCK:
+        for ev in events:
+            try:
+                cur = DB.execute(
+                    "INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?)",
+                    (str(ev.get("id")), device_id,
+                     float(ev.get("ts") or now()), str(ev.get("type") or "?"),
+                     json.dumps(ev.get("info") or {}, ensure_ascii=False), now()))
+                inserted += cur.rowcount
+            except Exception:
+                pass
+        DB.commit()
+    return inserted
+
+
+def db_group_map() -> dict:
+    """device_id -> [группы]"""
+    with DB_LOCK:
+        rows = DB.execute("SELECT name, devices FROM groups").fetchall()
+    gmap = {}
+    for name, devs in rows:
+        try:
+            for did in json.loads(devs or "[]"):
+                gmap.setdefault(did, []).append(name)
+        except Exception:
+            pass
+    return gmap
 
 
 def now(): return time.time()
@@ -129,7 +193,21 @@ async def ws_endpoint(ws: WebSocket):
                     d["last_seen"] = now()
                     if "battery" in msg:
                         d["info"]["battery"] = msg["battery"]
+                    if "farm" in msg:
+                        d["info"]["farm"] = msg["farm"]   # last_key_time → 🔑 дашборд
                 await queue.put({"type": "heartbeat_ack", "server_time": now()})
+
+            elif t == "events":
+                # ЭТАП 2: события фарма → SQLite. ack с числом обработанных —
+                # клиент после него двигает offset (outbox)
+                evs = [e for e in (msg.get("events") or [])[:200] if isinstance(e, dict)]
+                try:
+                    n_ins = db_events_insert(device_id, evs)
+                    if n_ins:
+                        log(f"[📅] {device_id}: +{n_ins} событий (из {len(evs)})")
+                except Exception as e:
+                    log(f"[!] events db {device_id}: {e}")
+                await queue.put({"type": "events_ack", "accepted": len(evs)})
 
             elif t == "result":
                 remember_result(msg.get("task_id", "?"), "done", device_id, msg.get("data"))
@@ -154,6 +232,7 @@ async def ws_endpoint(ws: WebSocket):
 
 @app.get("/api/devices")
 async def api_devices():
+    gmap = db_group_map()
     out = []
     for did, d in devices.items():
         out.append({
@@ -163,6 +242,7 @@ async def api_devices():
             "client_version": d.get("client_version"),
             "info": d.get("info", {}),
             "uptime_sec": int(now() - d["connected_at"]),
+            "groups": gmap.get(did, []),
         })
     return {"count": len(out), "devices": out}
 
@@ -222,6 +302,95 @@ async def api_update(body: dict):
 @app.get("/health")
 async def health():
     return {"ok": True, "host": "debian", "devices": len(devices), "time": now()}
+
+
+# ---------- События фарма (этап 2) ----------
+
+@app.get("/api/events")
+async def api_events(device_id: str = None, type: str = None, limit: int = 100):
+    q = "SELECT id, device_id, ts, type, info, recv FROM events"
+    conds, args = [], []
+    if device_id:
+        conds.append("device_id=?"); args.append(device_id)
+    if type:
+        conds.append("type=?"); args.append(type)
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY ts DESC LIMIT ?"
+    args.append(min(max(limit, 1), 500))
+    with DB_LOCK:
+        rows = DB.execute(q, args).fetchall()
+    return {"count": len(rows), "events": [
+        {"id": r[0], "device_id": r[1], "ts": r[2], "type": r[3],
+         "info": json.loads(r[4] or "{}"), "recv": r[5]} for r in rows]}
+
+
+@app.delete("/api/events")
+async def api_events_clear():
+    with DB_LOCK:
+        DB.execute("DELETE FROM events")
+        DB.commit()
+    return {"ok": True, "note": "история событий очищена"}
+
+
+# ---------- Группы устройств (этап 4) ----------
+
+@app.get("/api/groups")
+async def api_groups():
+    with DB_LOCK:
+        rows = DB.execute("SELECT name, devices, created FROM groups ORDER BY name").fetchall()
+    return {"groups": [
+        {"name": r[0], "devices": json.loads(r[1] or "[]"), "created": r[2]}
+        for r in rows]}
+
+
+@app.post("/api/groups")
+async def api_groups_save(body: dict):
+    """{"name": "bazа", "devices": ["phone_01", "phone_02"]} — создать/заменить"""
+    name = str(body.get("name") or "").strip()
+    members = body.get("devices") or []
+    if not name:
+        raise HTTPException(400, "no name")
+    if not isinstance(members, list):
+        raise HTTPException(400, "devices must be a list")
+    with DB_LOCK:
+        DB.execute("INSERT OR REPLACE INTO groups VALUES(?,?,?)",
+                   (name, json.dumps(members), now()))
+        DB.commit()
+    return {"ok": True, "name": name, "count": len(members)}
+
+
+@app.delete("/api/groups/{name}")
+async def api_groups_delete(name: str):
+    with DB_LOCK:
+        DB.execute("DELETE FROM groups WHERE name=?", (name,))
+        DB.commit()
+    return {"ok": True}
+
+
+@app.post("/api/groups/{name}/send")
+async def api_groups_send(name: str, body: dict):
+    """Задача всем ОНЛАЙН-устройствам группы (офлайн просто вернутся списком)"""
+    with DB_LOCK:
+        row = DB.execute("SELECT devices FROM groups WHERE name=?", (name,)).fetchone()
+    if not row:
+        raise HTTPException(404, "no such group")
+    members = json.loads(row[0] or "[]")
+    sent, offline = [], []
+    task_id = None
+    for did in members:
+        d = devices.get(did)
+        if not d:
+            offline.append(did)
+            continue
+        task_id = f"t_{secrets.token_hex(4)}"
+        msg = dict(body)
+        msg["task_id"] = task_id
+        await d["queue"].put(msg)
+        remember_result(task_id, "sent", did)
+        sent.append({"device_id": did, "task_id": task_id})
+    return {"group": name, "members": len(members),
+            "sent": sent, "offline": offline}
 
 
 # ---------- Дашборд ----------

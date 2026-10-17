@@ -4,7 +4,7 @@
 
 # 🚜 ФЕРМА — ПОЛНАЯ ДОКУМЕНТАЦИЯ v2
 
-*Клиент v0.7 · сервер v0.3 · неубиваемость v5. Обновлено: этап 1 (фарм-сервис) + APK-менеджер (⬇ APK).*
+*Клиент v0.8 · сервер v0.4 · неубиваемость v5. Обновлено: этап 2 (события фарма → SQLite) + этап 4 (группы устройств) + APK-менеджер (⬇ APK).*
 
 ---
 
@@ -27,7 +27,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 | Сервисы ≠ клиент ≠ сервер | фарм не знает про сервер, сервер не знает про фарм |
 | Один файл — один писатель | `farm_state.json` пишет фарм, клиент только читает |
 | Состояние в `info/` | атомарная запись, переживает ребуты и апдейты |
-| Фарм = чёрный ящик | `services/farm/` не знает про сервер, сервер не знает про фарм; связь только через `info/farm_state.json` (этап 2) |
+| Фарм = чёрный ящик | `services/farm/` не знает про сервер, сервер не знает про фарм; связь только через `info/`: `farm_state.json` (состояние) + `farm_events.jsonl` (события, этап 2) |
 | Любого можно убить | систему поднимет один из слоёв неубиваемости |
 | `client/` на сервере = истина | что там лежит — то и раздаётся телефонам при ⬆ |
 
@@ -39,11 +39,12 @@ http://gleb2009kiler-55019.portmap.host:55019
 
 ```
 /home/gleb/farm-server/
-├── main.py            ← сервер. Правки → sudo systemctl restart farm-api
+├── main.py            ← сервер v0.4. Правки → sudo systemctl restart farm-api
+├── farm.db            ← SQLite: события фарма + группы (создаётся сам)
 ├── bootstrap.py       ← установщик (раздаётся по /bootstrap.py)
 ├── dashboard.html     ← панель. Правки → просто F5 в браузере, БЕЗ рестарта
-└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (12 файлов)
-    ├── main.py            ← клиент v0.7
+└── client/            ← ★ ЕДИНЫЙ ИСТОЧНИК: раздаётся телефонам (13 файлов)
+    ├── main.py            ← клиент v0.8
     ├── setup.py           ← неубиваемость v5 (универсальная)
     ├── supervisor.sh      ← слой 3
     ├── keeper.sh          ← root-страж v2.1 (с логом)
@@ -52,15 +53,24 @@ http://gleb2009kiler-55019.portmap.host:55019
     ├── core/
     │   ├── connection.py      ← WS + бэкофф 5→10→20→40→60с
     │   ├── process_manager.py ← сервисы: pid/desired/failing
-    │   └── apk_manager.py     ← ⬇ APK: скачивание из link-apps, pm install,
-    │                             versionCode-диф, перезагрузка при обновлении
+    │   ├── apk_manager.py     ← ⬇ APK: скачивание из link-apps, pm install,
+    │   │                        versionCode-диф, перезагрузка при обновлении
+    │   └── events.py          ← ЭТАП 2: outbox событий фарма → сервер
     └── services/
         ├── services.json      ← манифест сервисов (demo, farm)
         ├── demo/main.py       ← тестовый сервис
         └── farm/main.py       ← 🚜 ФАРМ v16.2 (байпас ZEN + ферма Roblox;
-                                  state → info/farm_state.json; только stdlib,
+                                  state → info/farm_state.json, события →
+                                  info/farm_events.jsonl; только stdlib,
                                   pip на телефоне НЕ нужен)
 ```
+
+**События фарма (этап 2):** фарм пишет в `info/farm_events.jsonl` (одна JSON-строка — одно
+событие: `farm.start`, `bypass.start/ok/fail`, `farm.cycle`, `farm.restart`, `farm.stop/crash`).
+Клиент (`core/events.py`, outbox) читает файл по offset'у, шлёт батч ≤50 по WS (`events`),
+offset двигает ТОЛЬКО после `events_ack` — при потере связи батч уйдёт повторно, дубликаты
+отсекает сервер (id = PRIMARY KEY). Сервер складывает в `farm.db` (SQLite).
+Ротация файла: >512 КБ → хвост 300 событий. Планы дальше — `docs/будущий-функционал.md`.
 
 **APK-менеджер (⬇ APK):** список ссылок лежит в github `staffere228-alt/apk` → файл `link-apps`
 (одна ссылка на строку; можно `имя|ссылка` и #комментарии). Кнопка качает каждый APK,
@@ -86,10 +96,13 @@ http://gleb2009kiler-55019.portmap.host:55019
 | `/client/manifest` · `/client/file?path=` | раздача клиента + sha256 |
 | `/bootstrap.py` | установщик |
 | `/api/devices` · `/api/devices/{id}/send` · `/api/broadcast` | управление |
+| `/api/events` (`?device_id=&type=&limit=`) · `DELETE /api/events` | 📅 события фарма (SQLite) / очистить |
+| `/api/groups` (GET/POST) · `/api/groups/{name}` (DELETE) | 👥 группы устройств |
+| `/api/groups/{name}/send` | задача всем онлайн-устройствам группы |
 | `/api/update` (`{"device_id":...}` или `{"all":true}`) | обновление |
 | `/api/results/{task_id}` | результат задачи (TTL 1 час) |
 
-**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 12 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
+**Диагностика:** `curl http://127.0.0.1:8000/health` · `curl .../client/manifest` (должно быть 13 файлов) · снаружи не открывается → портmap.io (правило Active?) → tun0.
 
 ---
 
@@ -99,7 +112,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 
 ```
 ~/farm/
-├── main.py            ← клиент v0.7. Запускается ТОЛЬКО supervisor'ом
+├── main.py            ← клиент v0.8. Запускается ТОЛЬКО supervisor'ом
 ├── config.json        ← device_id, server_url, ws_url. Апдейтом НЕ трогается
 ├── setup.py           ← ставит неубиваемость (selfheal зовёт сам)
 ├── supervisor.sh      ← слой 3
@@ -109,16 +122,20 @@ http://gleb2009kiler-55019.portmap.host:55019
 ├── core/
 │   ├── connection.py
 │   ├── process_manager.py
-│   └── apk_manager.py ← APK-менеджер (задача apk.update)
+│   ├── apk_manager.py ← APK-менеджер (задача apk.update)
+│   └── events.py      ← outbox событий фарма → сервер (offset в info/)
 ├── services/          ← рабочие процессы
 │   ├── services.json
 │   ├── demo/main.py
-│   └── farm/main.py   ← 🚜 фарм v16.2 (state: info/farm_state.json)
+│   └── farm/main.py   ← 🚜 фарм v16.2 (state: info/farm_state.json,
+│                        события: info/farm_events.jsonl)
 ├── info/              ← СОСТОЯНИЕ (переживает всё)
 │   ├── client.pid         ← по нему supervisor/keeper видят живость клиента
 │   ├── pids/<name>.pid    ← pid сервисов
 │   ├── services_state.json← desired: что ДОЛЖНО работать
-│   ├── farm_state.json    ← пишет ТОЛЬКО фарм (last_key_time); клиент читает (этап 2)
+│   ├── farm_state.json    ← пишет ТОЛЬКО фарм (last_key_time); клиент читает → 🔑 дашборд
+│   ├── farm_events.jsonl  ← пишет ТОЛЬКО фарм; клиент читает по offset'у (этап 2)
+│   ├── events_offset.json ← пишет ТОЛЬКО клиент (до какого байта события ушли на сервер)
 │   ├── apk/               ← временные APK (кнопка ⬇ APK; чистится сама)
 │   ├── setup_done.json    ← маркер неубиваемости (v:5)
 │   └── STOP               ← ЕСТЬ = полный стоп (клиент+supervisor+keeper молчат)
@@ -208,7 +225,12 @@ http://gleb2009kiler-55019.portmap.host:55019
 
 ## 6. ПРОТОКОЛ
 
-**Телефон → сервер:** `hello` (device_id, версия, инфо) · `heartbeat` (каждые 30с: батарея, uptime) · `result` (ответ на задачу) · WS-ping.
+**Телефон → сервер:** `hello` (device_id, версия, инфо) · `heartbeat` (каждые 30с: батарея, uptime, farm = farm_state.json для колонки 🔑) · `events` (батч событий фарма, этап 2) · `result` (ответ на задачу) · WS-ping.
+
+**Сервер → телефон:** `welcome` · `heartbeat_ack` · `events_ack {accepted}` — после него клиент двигает offset (outbox) · `task`.
+
+**События фарма (этап 2):** `farm.start` · `bypass.start` · `bypass.ok` (ключ+попытка) · `bypass.fail` · `farm.cycle` (сколько пакетов) · `farm.restart` (окно не было видно) · `farm.stop` · `farm.crash`.
+Смотреть: кнопка 📅 на устройстве или `/api/events?device_id=...`.
 
 **Задачи (сервер → телефон), v0.5:**
 
@@ -232,7 +254,7 @@ http://gleb2009kiler-55019.portmap.host:55019
 
 ```
 1. Правишь ~/farm-server/client/... (в main.py подними VERSION!)
-2. py_compile → curl /client/manifest (10 файлов?)
+2. py_compile → curl /client/manifest (13 файлов?)
 3. Дашборд → ⬆ / «Обновить всех»
 4. Телефон: манифест → скачал изменившееся → проверил → применил атомарно
    → ответил → os._exit(0) → supervisor поднял нового → ● мигнул и вернулся
@@ -266,9 +288,15 @@ bootstrap: скачал 10 файлов → config.json с уникальным 
 | Кнопка | Действие |
 |---|---|
 | клик по строке | выбрать устройство |
+| галочка «гр» | отметить устройство в группу (живёт между обновлениями таблицы) |
 | `ping` · `exec` · `статус` | диагностика |
 | `demo ▶/⏹` · `demo.log` | тестовый сервис |
 | `farm ▶/⏹` · `farm.log` · `state` | 🚜 ФАРМ: старт/стоп сервиса, лог фарма, farm_state.json (таймер байпаса) |
+| `📅` (устройство) · `📅 События (все)` | 📅 история событий фарма из SQLite (этап 2) |
+| `📅 Очистить историю` | очистить таблицу событий |
+| `🔑` (колонка) | сколько часов назад фарм получил ключ (из farm_state.json в heartbeat) |
+| Группы: `💾 Сохранить...` / `🗑 Удалить` | сохранить выбранные галочками как группу / удалить группу (этап 4) |
+| `🚜 farm ▶/⏹ группе` · `⬇ APK группе` · `⬆ группе` · `📢 ping группе` | команда всем ОНЛАЙН устройствам группы (офлайн выводятся списком) |
 | `⬇ APK` · `⬇ APK всем` | установка/обновление APK из link-apps; при обновлении версии телефон перезагружается сам |
 | `🚜 farm ▶/⏹ всем` | старт/стоп фарма на ВСЕХ устройствах разом |
 | `лог` · `sup` | **client.log / supervisor.log** — дебаг слоёв 2-3 из браузера |
@@ -334,11 +362,13 @@ su -c "tail -20 /data/local/tmp/farm-keeper.log"   # лог root-стража
 |---|---|---|
 | 0 | Неубиваемость v5 сдана (ребут/убийство/стоп-старт — всё зелёное) | ✅ |
 | 1 | Фарм v16.2 как сервис (чёрный ящик в services/farm/) | ✅ СДАН: services/farm/main.py + манифест + кнопки дашборда (farm ▶/⏹/лог/state, массовый старт); stdlib-only, state в info/farm_state.json |
-| 2 | События фарма (farm_events.jsonl → heartbeat → SQLite) + outbox | ⬜ |
-| 3 | Алерты в Telegram (с сервера) | ⬜ |
-| 4 | Масштаб: 5+ телефонов, группы устройств | ⬜ |
+| 2 | События фарма (farm_events.jsonl → heartbeat → SQLite) + outbox | ✅ СДАН: фарм пишет info/farm_events.jsonl, клиент v0.8 (core/events.py) возит батчи по WS, сервер v0.4 кладёт в farm.db (id = защита от дублей), кнопка 📅 на панели, 🔑 возраст ключа в таблице |
+| 3 | ~~Алерты в Telegram~~ — УДАЛЕН ИЗ ПЛАНА (Telegram заблокирован). Вместо него — отдельное приложение на Android, см. docs/будущий-функционал.md §1 | 📱 план хозяина |
+| 4 | Масштаб: 5+ телефонов, группы устройств | ✅ СДАН: группы в farm.db, галочки «гр» на панели, команды группе (farm ▶/⏹, ⬇ APK, ⬆, ping), /api/groups + /api/groups/{name}/send |
 | 5 | Модульный фарм (input/bypass/zen/logic + config.json без кода) | ⬜ |
 | 6 | Безопасность (токены API), ротация логов, selfheal keeper'а, backup client/ в git | ⬜ |
+
+Больше планов (приложение на Android, графики, конфиг фарма) — в **docs/будущий-функционал.md**.
 
 ---
 
@@ -365,4 +395,25 @@ su -c "tail -20 /data/local/tmp/farm-keeper.log"   # лог root-стража
 (после ответа серверу, через 5с). Установка без смены версии — без ребута.
 Формат link-apps: одна ссылка на строку, поддерживаются `имя|ссылка` и #комментарии.
 
-**Следующий — этап 2:** события фарма (`farm_events.jsonl` → heartbeat → SQLite) + outbox.
+**Этапы 2 и 4 СДАНЫ.** Что вошло:
+
+- `client/services/farm/main.py` — emit(): события в `info/farm_events.jsonl` (id/ts/type/info,
+  ротация >512 КБ → хвост 300): `farm.start/bypass.start/bypass.ok/bypass.fail/farm.cycle/
+  farm.restart/farm.stop/farm.crash`. Логика фарма не менялась.
+- `client/core/events.py` — outbox: читает jsonl по offset'у (info/events_offset.json — атомарно),
+  отдаёт только ЦЕЛЫЕ строки, offset двигает только после events_ack; после ротации файла —
+  авто-сброс, дублей на сервере не будет (id = PRIMARY KEY).
+- `client/main.py` v0.8 — events_loop (батч ≤50 раз в 15с), events_ack → commit, farm_state.json
+  в heartbeat (для 🔑).
+- `main.py` (сервер v0.4) — `farm.db` (SQLite): таблицы events + groups; WS `events` → INSERT
+  OR IGNORE → `events_ack`; API `/api/events`, `/api/groups`, `/api/groups/{name}/send`;
+  в `/api/devices` добавлены groups и farm-инфо.
+- `dashboard.html` — галочки «гр», панель Группы (сохранить/удалить/команды группе), кнопка 📅
+  (события по устройству и все), колонка 🔑 (возраст ключа), бейджи групп в строке.
+- `docs/будущий-функционал.md` — планы: Android-приложение (вместо Telegram), этап 5, 6, мелочи.
+
+**Как включить:** дашборд ⬆ (обновить клиента до v0.8) → рестарт сервера (`sudo systemctl restart farm-api`)
+→ фарм сам начнёт писать события, панель покажет их по кнопке 📅. Группы: поставь галочки
+«гр» → 💾 Сохранить → выбери в списке → команды группе.
+
+**Следующий — этап 5** (модульный фарм, config.json) — или приложение на Android (см. план).

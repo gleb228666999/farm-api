@@ -15,6 +15,11 @@ stdout уходит в logs/services/farm.log.
 - ✅ Компактный лог мониторинга: одна строка на проверку (ротации логов нет).
 - ✅ Ноль связи с сервером: фарм ничего не знает про сервер и наоборот.
 
+Этап 2 (события):
+- ✅ Фарм пишет события в info/farm_events.jsonl (одна JSON-строка на событие).
+    Клиент читает их (outbox) и доставляет на сервер → SQLite. Фарм про сервер
+    по-прежнему НЕ знает: только файл, принцип «один файл — один писатель».
+
 v16.2 (оригинал):
 - ✅ ВСЕГДА перезаписывает /storage/emulated/0/Delta/Autoexecute/1.lua при запуске
 - ✅ Прямой запрос к ZEN-API
@@ -71,6 +76,9 @@ PLACE_ID = "142823291"
 # --- системные пути (~/farm) ---
 FARM_BASE = Path(__file__).resolve().parents[2]      # services/farm/main.py -> ~/farm
 STATE_FILE = FARM_BASE / "info" / "farm_state.json"  # состояние переживает всё
+EVENTS_FILE = FARM_BASE / "info" / "farm_events.jsonl"  # события фарма (этап 2)
+EVENTS_MAX_BYTES = 512 * 1024   # ротация: файл разросся → оставляем хвост
+EVENTS_KEEP = 300               # сколько последних событий переживает ротацию
 
 state = {"last_key_time": 0.0}
 
@@ -138,8 +146,40 @@ def save_state():
 def _sigterm(signum, frame):
     """Корректная остановка: farm ⏹ / полный стоп / рестарт сервиса."""
     log("🛑 SIGTERM: сохраняю state и выхожу...")
+    emit("farm.stop")
     save_state()
     sys.exit(0)
+
+
+# ==========================================
+# 📤 СОБЫТИЯ (info/farm_events.jsonl, этап 2)
+# ==========================================
+# Фарм только ПИШЕТ события. Кто их заберёт (клиент → сервер → SQLite) —
+# фарм не волнует. Дубликаты не страшны: сервер отсекает по id.
+
+def emit(etype, **info):
+    """Одна JSON-строка в farm_events.jsonl. Никогда не роняет фарм."""
+    try:
+        EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # примитивная ротация: разросся → оставляем хвост
+        try:
+            if EVENTS_FILE.exists() and EVENTS_FILE.stat().st_size > EVENTS_MAX_BYTES:
+                tail = EVENTS_FILE.read_text().splitlines()[-EVENTS_KEEP:]
+                tmp = EVENTS_FILE.with_suffix(".tmp")
+                tmp.write_text("\n".join(tail) + "\n")
+                tmp.replace(EVENTS_FILE)
+        except Exception:
+            pass
+        ev = {
+            "id": f"{int(time.time()*1000):x}-{os.urandom(3).hex()}",
+            "ts": round(time.time(), 2),
+            "type": etype,
+            "info": info,
+        }
+        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"⚠️ emit({etype}): {e}")
 
 
 # ==========================================
@@ -332,6 +372,7 @@ def is_pkg_visible(pkg, win_out, act_out):
 
 def restart_pkg(pkg):
     """🔄 Принудительно останавливает пакет, ждет 15 сек и запускает его снова в плейс"""
+    emit("farm.restart", pkg=pkg)
     log(f"⚠️ Окно {pkg} не видно → останавливаю пакет...")
     run_su(f"am force-stop {pkg}", timeout=5)
 
@@ -528,6 +569,7 @@ def inject_key(key):
 
 
 def run_bypass_cycle():
+    emit("bypass.start")
     for attempt in range(1, MAX_RETRIES + 1):
         log(f"🔁 Байпас {attempt}/{MAX_RETRIES}")
 
@@ -559,9 +601,11 @@ def run_bypass_cycle():
         if inject_key(key):
             state["last_key_time"] = time.time()
             save_state()
+            emit("bypass.ok", key=key[:14] + "…", attempt=attempt)
             log("💾 Таймер байпаса обновлён")
             return True
 
+    emit("bypass.fail", retries=MAX_RETRIES)
     return False
 
 
@@ -592,6 +636,8 @@ def main():
         log("⚠️ Lua файл не удалось перезаписать, но продолжаем\n")
 
     load_state()
+    emit("farm.start", pid=os.getpid(),
+         last_key_age_h=round((time.time() - state.get("last_key_time", 0)) / 3600, 1))
 
     while True:
         now = time.time()
@@ -606,6 +652,7 @@ def main():
 
         kill_all_roblox()
         farm_pkgs = launch_roblox_light_farm()
+        emit("farm.cycle", packages=len(farm_pkgs), hours=FARM_CYCLE_SECONDS // 3600)
         log(f"💤 Фарм {FARM_CYCLE_SECONDS//60} мин с мониторингом каждые {FARM_CHECK_INTERVAL} сек...")
         monitor_farm(FARM_CYCLE_SECONDS, farm_pkgs)
 
@@ -615,6 +662,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         log("🛑 Остановлено пользователем")
+        emit("farm.stop", reason="keyboard")
         save_state()
     except SystemExit:
         raise
@@ -622,5 +670,6 @@ if __name__ == "__main__":
         log(f"💥 Crash: {e}")
         import traceback
         traceback.print_exc()
+        emit("farm.crash", error=str(e)[:200])
         save_state()
         time.sleep(60)
