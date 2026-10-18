@@ -5,6 +5,10 @@ import type { FarmCallResult } from "@/lib/farm-types";
 
 const BASE_KEY = "farm_base_url";
 
+// Дефолт: сервер фермы на той же машине (превью/локальный запуск).
+// Меняется в шапке панели и сохраняется в localStorage.
+const DEFAULT_BASE = "http://127.0.0.1:8000";
+
 export function loadBase(): string {
   if (typeof window === "undefined") return "";
   try {
@@ -83,7 +87,7 @@ export const useFarm = create<FarmState>((set, get) => ({
   },
 
   initBase: () => {
-    const b = loadBase();
+    const b = loadBase() || DEFAULT_BASE;
     if (b) set({ base: b });
   },
 
@@ -121,15 +125,18 @@ export const useFarm = create<FarmState>((set, get) => ({
     if (!res.ok) return res;
 
     // вытащить task_id из ответа сервера
+    // (api_broadcast → sent: число, api_groups_send → sent: массив объектов)
     const d = res.data as {
       task_id?: string;
       task_ids?: string[];
-      sent?: Array<{ device_id?: string; task_id: string }>;
+      sent?: number | Array<{ device_id?: string; task_id: string }>;
     } | null;
     const taskIds: string[] = [];
     if (d?.task_id) taskIds.push(d.task_id);
     if (d?.task_ids) taskIds.push(...d.task_ids);
-    if (d?.sent) for (const s of d.sent) if (s?.task_id) taskIds.push(s.task_id);
+    if (Array.isArray(d?.sent)) {
+      for (const s of d.sent) if (s?.task_id) taskIds.push(s.task_id);
+    }
 
     const waitSec = opts.waitSec ?? 0;
     if (!taskIds.length || waitSec <= 0 || taskIds.length > 1) return res;

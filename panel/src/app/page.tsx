@@ -1,6 +1,7 @@
 "use client";
 
 import { ConnectionBar } from "@/components/farm/connection-bar";
+import { FunctionsPanel } from "@/components/farm/functions-panel";
 import { DevicesPanel } from "@/components/farm/devices-panel";
 import { CommandsPanel } from "@/components/farm/commands-panel";
 import { PoolPanel } from "@/components/farm/pool-panel";
@@ -12,6 +13,7 @@ import { LogPanel } from "@/components/farm/log-panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useFarm } from "@/lib/farm-store";
 import {
+  SlidersHorizontal,
   Smartphone,
   Megaphone,
   Cookie,
@@ -50,9 +52,13 @@ export default function Home() {
       <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 px-4 py-4">
         <ConnectionBar />
 
-        <Tabs defaultValue="devices">
+        <Tabs defaultValue="functions">
           <div className="overflow-x-auto pb-1">
             <TabsList className="h-auto w-max min-w-full justify-start gap-0.5 sm:w-full">
+              <TabsTrigger value="functions" className="gap-1.5">
+                <SlidersHorizontal className="h-4 w-4" />
+                Функции
+              </TabsTrigger>
               <TabsTrigger value="devices" className="gap-1.5">
                 <Smartphone className="h-4 w-4" />
                 Устройства
@@ -91,6 +97,9 @@ export default function Home() {
             </TabsList>
           </div>
 
+          <TabsContent value="functions" className="mt-3">
+            <FunctionsPanel />
+          </TabsContent>
           <TabsContent value="devices" className="mt-3">
             <DevicesPanel />
           </TabsContent>

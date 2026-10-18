@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useFarm } from "@/lib/farm-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,12 +24,7 @@ export function ConnectionBar() {
     setDraft(base);
   }
 
-  async function checkHealth() {
-    if (!draft.trim()) {
-      toast.error("Введи адрес сервера фермы (например http://1.2.3.4:8000)");
-      return;
-    }
-    setBase(draft.trim());
+  async function runCheck(url: string) {
     setHealth("checking");
     const res = await call({
       label: "🔎 Проверка связи (/health)",
@@ -45,11 +40,30 @@ export function ConnectionBar() {
       });
     } else {
       setHealth("down", res.error || "нет ответа");
-      toast.error("Сервер не отвечает", {
+      toast.error(`Сервер не отвечает (${url})`, {
         description: res.error || "проверь адрес и доступность",
       });
     }
   }
+
+  async function checkHealth() {
+    if (!draft.trim()) {
+      toast.error("Введи адрес сервера фермы (например http://1.2.3.4:8000)");
+      return;
+    }
+    setBase(draft.trim());
+    await runCheck(draft.trim());
+  }
+
+  // --- автопроверка при загрузке: как только base известен и ещё не проверен ---
+  const autoChecked = useRef("");
+  useEffect(() => {
+    if (!base || health !== "unknown") return;
+    if (autoChecked.current === base) return;
+    autoChecked.current = base;
+    const t = setTimeout(() => void runCheck(base), 300);
+    return () => clearTimeout(t);
+  }, [base, health]);
 
   return (
     <div className="flex flex-col gap-2 rounded-xl border bg-card p-3 sm:flex-row sm:items-center sm:gap-3">
