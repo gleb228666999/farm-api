@@ -1,0 +1,9 @@
+node_modules/
+.next/
+out/
+dev.log
+server.log
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+bun.lock

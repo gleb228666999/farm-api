@@ -10,6 +10,8 @@
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь/архив)
 - /api/schedule            ⏰ расписание: рега ежедневно + сбор в 20:00 МСК (2×20 мин)
 - /                        дашборд (dashboard.html)
+- v0.15: /api/devices/{id}/send, /api/broadcast, /api/groups/{name}/send —
+          type:"task" ставится АВТОМАТИЧЕСКИ (клиент отвечает только на type=task)
 """
 import json
 import time
@@ -279,6 +281,7 @@ async def api_send(device_id: str, body: dict):
         raise HTTPException(404, "device not connected")
     task_id = body.pop("task_id", None) or f"t_{secrets.token_hex(4)}"
     body["task_id"] = task_id
+    body.setdefault("type", "task")   # v0.15: клиент отвечает только на type=="task"
     await d["queue"].put(body)
     remember_result(task_id, "sent", device_id)
     return {"task_id": task_id, "status": "sent"}
@@ -291,6 +294,7 @@ async def api_broadcast(body: dict):
         task_id = f"t_{secrets.token_hex(4)}"
         msg = dict(body)
         msg["task_id"] = task_id
+        msg.setdefault("type", "task")   # v0.15
         await d["queue"].put(msg)
         remember_result(task_id, "sent", did)
         sent.append(task_id)
@@ -411,6 +415,7 @@ async def api_groups_send(name: str, body: dict):
         task_id = f"t_{secrets.token_hex(4)}"
         msg = dict(body)
         msg["task_id"] = task_id
+        msg.setdefault("type", "task")   # v0.15
         await d["queue"].put(msg)
         remember_result(task_id, "sent", did)
         sent.append({"device_id": did, "task_id": task_id})
