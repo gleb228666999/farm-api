@@ -26,12 +26,37 @@ select{background:#222;color:#ddd;padding:4px 8px;border:1px solid #444;border-r
 textarea{background:#111;color:#9f9;border:1px solid #444;border-radius:4px;width:100%;
         font-family:monospace;font-size:.85em;box-sizing:border-box}
 input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px}
+.big{padding:10px 16px;font-size:1.05em;border-radius:6px;margin:3px;font-weight:bold}
 .poolrow{display:flex;gap:6px;align-items:center;border-bottom:1px dotted #333;padding:2px 0;flex-wrap:wrap}
 .pbadge{border-radius:3px;padding:1px 5px;font-size:.78em}
 .pb-free{background:#253;color:#8f8}.pb-busy{background:#431;color:#fa0}.pb-arch{background:#243;color:#8cf}
 </style></head><body>
 <h1>🚜 Farm Dashboard</h1>
 <div class="mut" id="summary">загрузка...</div>
+
+<div class="panel" style="border:2px solid #4a4;background:#122012">
+<b style="font-size:1.15em">🎛 КНОПКИ ФУНКЦИЙ</b>
+<span class="mut" id="selInfo"> — кликни по устройству в таблице ниже, потом жми кнопку</span><br><br>
+<button class="big b" onclick="ping(selected)">📢 Ping</button>
+<button class="big b" onclick="st(selected)">📊 Статус</button>
+<button class="big" onclick="farmOn(selected)">🚜 Фарм ▶</button>
+<button class="big r" onclick="farmOff(selected)">🚜 Фарм ⏹</button>
+<button class="big" style="background:#a4a" title="сброс кулдауна ключа → фарм ⏹ → фарм ▶" onclick="bypassSel(selected)">🔓 БАЙПАС</button>
+<button class="big" title="рега 20 попыток на устройстве" onclick="rega(selected)">🆕 Рег акков</button>
+<button class="big" onclick="harvestOn(selected)">🌾 Сбор ▶</button>
+<button class="big r" onclick="harvestOff(selected)">🌾 Сбор ⏹</button>
+<button class="big" onclick="cookieCheck(selected)">🍪 Проверка кук</button>
+<button class="big b" onclick="farmLog(selected)">📄 farm.log</button>
+<button class="big b" onclick="farmState(selected)">📄 farm_state</button>
+<button class="big b" onclick="ev(selected)">📅 События</button>
+<button class="big u" onclick="upd(selected)">⬆ Update</button>
+<button class="big u" onclick="apk(selected)">⬇ APK</button>
+<button class="big b" onclick="exe(selected)">💻 Exec</button>
+<button class="big g" title="перезапуск клиента на телефоне" onclick="restartCli(selected)">♻️ Restart</button>
+<button class="big r" title="полный стоп клиента и сервисов" onclick="haltCli(selected)">⛔ Halt</button>
+<div class="mut" style="margin-top:6px">🔓 БАЙПАС = сброс last_key_time в info/farm_state.json → фарм ⏹ → фарм ▶ (робот сразу продолжит без ожидания ключа)</div>
+</div>
+
 <table><thead><tr><th>гр</th><th>Устройство</th><th>Модель</th><th>Батарея</th>
 <th>🔑 ключ</th><th>Версия</th><th>Аптайм</th><th>Был</th><th>Действия</th></tr></thead>
 <tbody id="rows"></tbody></table>
@@ -82,13 +107,14 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button class="b" onclick="showEvents()">📅 События (все)</button>
 <button class="g" onclick="clearEvents()">📅 Очистить историю</button>
 </div>
-<div class="mut" style="margin-top:8px">клик по строке = выбрать устройство · галочка «гр» = в группу</div>
+<div class="mut" style="margin-top:8px">клик по строке = выбрать устройство · галочка «гр» = в группу · все функции также на кнопках 🎛 сверху и в строках таблицы</div>
 <div id="out"></div>
 <script>
 let selected=null;
 let GROUPS={};                    // имя -> [device_id]
 const checked=new Set();          // галочки «гр» (живут между обновлениями таблицы)
 const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function show(t){$('out').style.display='block';$('out').textContent=t}
 async function sendTask(body){
   if(!selected){show('❌ сначала кликни по устройству');return null}
@@ -128,6 +154,50 @@ function exe(d){
   selected=d;
   const c=prompt('Shell-команда на '+d+':','');
   if(c)run({type:'task',task:'exec',payload:{command:c,timeout:30}},'$ '+c,35000);
+}
+// ---------- 🔓 БАЙПАС + 🆕 рега + 🌾 сбор + ♻️/⛔ по устройству ----------
+const RESET_KEY_CMD='python -c "import json,pathlib;p=pathlib.Path(\'info/farm_state.json\');d=json.loads(p.read_text()) if p.exists() else {};d[\'last_key_time\']=0;p.write_text(json.dumps(d))"';
+async function bypassSel(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  if(!confirm('🔓 БАЙПАС '+d+': сброс кулдауна ключа → фарм ⏹ → фарм ▶. Продолжить?'))return;
+  selected=d;
+  show('🔓 Байпас '+d+': шаг 1/3 — сброс кулдауна ключа...');
+  const t1=await sendTask({type:'task',task:'exec',payload:{command:RESET_KEY_CMD,timeout:20}});
+  if(t1){const r1=await waitResult(t1.task_id,25000);show(r1?'🔓 шаг 1/3 ✓ — кулдаун сброшен':'⏰ шаг 1/3: нет ответа exec');}
+  await sleep(2000);
+  show('🔓 Байпас '+d+': шаг 2/3 — фарм ⏹ (закрывает роблоксы)...');
+  const t2=await sendTask({type:'task',task:'service.stop',payload:{name:'farm'}});
+  if(t2){const r2=await waitResult(t2.task_id,30000);show(r2?'🔓 шаг 2/3 ✓ — фарм остановлен':'⏰ шаг 2/3: нет ответа');}
+  await sleep(3000);
+  show('🔓 Байпас '+d+': шаг 3/3 — фарм ▶ (кулдаун 0 → байпас сразу)...');
+  const t3=await sendTask({type:'task',task:'service.start',payload:{name:'farm'}});
+  if(!t3)return;
+  const r3=await waitResult(t3.task_id,20000);
+  show('🔓 БАЙПАС '+d+' ГОТОВ ✓\nфарм перезапущен, кулдаун ключа = 0 → байпас сработает сразу.\nсмотри 📅 События: bypass.*\n\n'+(r3?JSON.stringify(r3.data,null,2).slice(0,1500):''));
+}
+function rega(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  if(!confirm('🆕 Рег акков на '+d+'? (20 попыток, отдых 15 мин после каждых 10)'))return;
+  selected=d;run({type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
+}
+function harvestOn(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  const m=prompt('🌾 Сбор на '+d+': минут (пусто = 20):','20');if(m===null)return;
+  selected=d;run({type:'task',task:'harvest.start',payload:{minutes:parseInt(m)||20}},'🌾 Сбор старт ('+d+', '+(parseInt(m)||20)+' мин)',20000);
+}
+function harvestOff(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  selected=d;run({type:'task',task:'harvest.stop'},'🌾 Сбор стоп ('+d+')',30000);
+}
+function restartCli(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  if(!confirm('♻️ Restart клиента '+d+'? (клиент перезапустится сам)'))return;
+  selected=d;run({type:'task',task:'restart'},'♻️ restart ('+d+')',15000);
+}
+function haltCli(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  if(!confirm('⛔ HALT '+d+': ПОЛНЫЙ стоп клиента и всех сервисов?'))return;
+  selected=d;run({type:'task',task:'halt'},'⛔ halt ('+d+')',15000);
 }
 function keyAge(d){
   const f=d.info&&d.info.farm;
@@ -366,6 +436,8 @@ async function refresh(){
     const j=await(await fetch('/api/devices')).json();
     $('summary').textContent='устройств: '+j.count+(selected?' | выбрано: '+selected:'')
       +(checked.size?' | в группе: '+checked.size:'');
+    $('selInfo').textContent=selected?(' → выбрано: '+selected+' — жми кнопку')
+      :' — кликни по устройству в таблице, потом жми кнопку';
     $('rows').innerHTML=j.devices.map(d=>{
       const bat=(d.info&&d.info.battery!=null)?d.info.battery:'?';
       const model=(d.info&&d.info.model)?d.info.model:'?';
@@ -385,10 +457,16 @@ async function refresh(){
             <button class="b" onclick="demoLog('${d.device_id}')">лог</button>
             <button onclick="farmOn('${d.device_id}')">farm ▶</button>
             <button class="r" onclick="farmOff('${d.device_id}')">farm ⏹</button>
+            <button style="background:#a4a" title="БАЙПАС" onclick="bypassSel('${d.device_id}')">🔓</button>
+            <button title="Рег акков" onclick="rega('${d.device_id}')">🆕</button>
+            <button title="Сбор старт" onclick="harvestOn('${d.device_id}')">🌾▶</button>
+            <button class="r" title="Сбор стоп" onclick="harvestOff('${d.device_id}')">🌾⏹</button>
             <button class="b" onclick="farmLog('${d.device_id}')">farm.log</button>
             <button class="b" onclick="farmState('${d.device_id}')">state</button>
             <button class="b" onclick="cookieCheck('${d.device_id}')">🍪</button>
             <button class="b" onclick="ev('${d.device_id}')">📅</button>
+            <button class="g" title="Restart клиента" onclick="restartCli('${d.device_id}')">♻️</button>
+            <button class="r" title="Halt" onclick="haltCli('${d.device_id}')">⛔</button>
             <button class="u" onclick="apk('${d.device_id}')">⬇ APK</button>
             <button class="u" onclick="upd('${d.device_id}')">⬆</button></td></tr>`;
     }).join('')||'<tr><td colspan="9" class="mut">нет устройств</td></tr>';
