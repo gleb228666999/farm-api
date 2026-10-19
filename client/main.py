@@ -35,6 +35,11 @@
 - v0.14: (в сервисах) рега = 20 попыток (2 подхода × 10) ВСЕГДА, не важно
         удачно или нет — досрочного выхода по достижении цели нет, излишки
         идут в пул; после каждых 10 попыток отдых 15 мин (rate-limit тоже 15)
+- v0.15: задача bypass.run — БАЙПАС КАК В v18.8 ПО КНОПКЕ: клиент ставит
+        флаг info/bypass_force.json → фарм (services/farm) в ≤30с делает
+        ПОЛНЫЙ цикл (Delta → реклама → ZEN-API → ключ → license) БЕЗ рестарта
+        сервиса; если фарм не жил — сам запускается и сразу байпасит;
+        вылетевшие клоны при фарме И при сборе мониторинг перезапускает в плейс
 """
 import sys
 import os
@@ -62,7 +67,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.14"
+VERSION = "0.15"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -288,6 +293,30 @@ def task_rega_start(payload: dict) -> dict:
     return r
 
 
+def task_bypass_run(payload: dict) -> dict:
+    """🔓 БАЙПАС КАК В v18.8: ставим флаг — фарм в ≤30с делает ПОЛНЫЙ цикл
+    (Delta → реклама → ZEN-API → ключ → license) БЕЗ рестарта сервиса.
+    Фарм не жил → запускаем: он стартует и сразу увидит флаг."""
+    data = {"ts": round(time.time(), 1),
+            "source": str(payload.get("source") or "dashboard")}
+    f = BASE / "info" / "bypass_force.json"
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(f)                                   # атомарно
+    was_running = PM.is_running("farm")
+    started = False
+    if not was_running:
+        r = PM.start("farm")
+        started = bool(r.get("ok"))
+    log(f"🔓 Флаг байпаса v18.8 поставлен (фарм "
+        f"{'уже жил' if was_running else ('запущен' if started else 'НЕ запущен!')})")
+    return {"ok": True, "farm_was_running": was_running, "farm_started": started,
+            **data,
+            "note": "фарм выполнит полный байпас v18.8 ≤30с; "
+                    "события bypass.ok/bypass.fail → 📅; вылетевшие клоны "
+                    "перезапускаются в плейс мониторингом каждые 30с"}
+
+
 def task_cookie_check(payload: dict) -> dict:
     """Быстрая проверка кук (rega check) — в фоне, результат придёт событиями."""
     log("🍪 cookie.check: запускаю services/rega/main.py check")
@@ -308,6 +337,7 @@ TASKS_SYNC = {
     "harvest.stop":   task_harvest_stop,
     "rega.start":     task_rega_start,
     "cookie.check":   task_cookie_check,
+    "bypass.run":     task_bypass_run,
 }
 
 

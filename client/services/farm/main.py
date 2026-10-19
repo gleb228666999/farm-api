@@ -61,6 +61,16 @@ v0.14 (байпас v18.8 + рега 20 попыток):
     удачные или нет; излишки (>5) → общий пул НА СЕРВЕРЕ; телефоны, у которых
     из 20 попыток меньше 5 удачных, добирают кук из этого пула (→ архив).
 
+v0.15 (байпас по кнопке + перезапуск клонов при сборе):
+- ✅ Задача bypass.run (клиент) → флаг info/bypass_force.json → фарм в ≤30с делает
+    ПОЛНЫЙ цикл v18.8 БЕЗ рестарта сервиса (Delta → реклама → ZEN-API → ключ →
+    license + read-back). Фарм не жил → клиент сам его стартует.
+- ✅ Мониторинг прерывается флагом байпаса — и при фарме, и при сборе;
+    после байпаса сбор продолжится на остаток окна.
+- ✅ Вылетевший клон (окно не видно в dumpsys) → force-stop → 15с → запуск
+    СРАЗУ В ПЛЕЙС (roblox://experiences/start?placeId=...) — как в v18.8:
+    и во время обычного фарма, и во время сбора (в плейс приватки).
+
 v16.2 (оригинал):
 - ✅ ВСЕГДА перезаписывает /storage/emulated/0/Delta/Autoexecute/1.lua при запуске
 - ✅ Прямой запрос к ZEN-API
@@ -155,6 +165,9 @@ EVENTS_MAX_BYTES = 512 * 1024   # ротация: файл разросся → 
 EVENTS_KEEP = 300               # сколько последних событий переживает ротацию
 # 🌾 окно сбора урожая: пишет КЛИЕНТ (задача harvest.start с сервера), фарм ТОЛЬКО читает
 HARVEST_WINDOW_FILE = FARM_BASE / "info" / "harvest_window.json"
+# 🔓 флаг байпаса по кнопке: пишет КЛИЕНТ (задача bypass.run с сервера/дашборда),
+# фарм забирает его и делает ПОЛНЫЙ цикл v18.8 (Delta → ZEN-API → ключ → license)
+BYPASS_FORCE_FILE = FARM_BASE / "info" / "bypass_force.json"
 
 state = {"last_key_time": 0.0}
 
@@ -376,6 +389,26 @@ def harvest_window():
         return {"until_ts": until, "place_id": str(hw.get("place_id") or "")}
     except Exception:
         return None
+
+
+def bypass_requested() -> bool:
+    """🔓 Кнопка байпаса на дашборде (клиент пишет bypass_force.json)?"""
+    return BYPASS_FORCE_FILE.is_file()
+
+
+def consume_bypass_request():
+    """Забрать флаг байпаса (атомарно: прочитали → удалили). None = флага нет."""
+    try:
+        data = json.loads(BYPASS_FORCE_FILE.read_text())
+    except Exception:
+        data = {"ts": round(time.time(), 1)}
+    try:
+        BYPASS_FORCE_FILE.unlink()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        pass
+    return data
 
 
 # ==========================================
@@ -609,13 +642,16 @@ def monitor_farm(duration, farm_pkgs, harvest=False):
     harvest=False — обычный фарм: выходим, когда окно сбора ПОЯВИЛОСЬ (20:00 МСК)."""
     if not farm_pkgs:
         log("⚠️ Нет пакетов для мониторинга, просто ждём...")
-        # даже без пакетов ждём с проверкой окна сбора
+        # даже без пакетов ждём с проверкой окна сбора И флага байпаса
         end0 = time.time() + duration
         while time.time() < end0:
+            if bypass_requested():
+                log("🔓 Запрошен байпас с дашборда — выхожу из ожидания")
+                return "bypass"
             if (harvest_window() is not None) != harvest:
-                return
+                return None
             time.sleep(min(FARM_CHECK_INTERVAL, max(0, end0 - time.time())))
-        return
+        return None
 
     log(f"👁 Мониторинг {len(farm_pkgs)} пакетов каждые {FARM_CHECK_INTERVAL} сек...")
     log(f"⏱️ Задержка перед перезапуском вылетевшего: {FARM_RESTART_DELAY} сек")
@@ -630,11 +666,16 @@ def monitor_farm(duration, farm_pkgs, harvest=False):
         if time.time() >= end_time:
             break
 
+        # 🔓 байпас по кнопке — приоритетнее всего (фарм и сбор прерываем)
+        if bypass_requested():
+            log("🔓 Запрошен байпас с дашборда — прерываю мониторинг")
+            return "bypass"
+
         # 🌾 окно сбора появилось (обычный фарм) или исчезло (сбор) → выходим,
         # вызывающий код сам переключится на сбор / вернётся к фарму
         if (harvest_window() is not None) != harvest:
             log("🌾 Изменение окна сбора — переключаю режим")
-            return
+            return None
 
         log("🔍 Проверка видимости окон фермы...")
         win_out, act_out = get_visibility_snapshots()
@@ -667,7 +708,15 @@ def run_harvest_session(hw):
     emit("harvest.start", minutes=minutes, place=place)
     kill_all_roblox()
     farm_pkgs = launch_roblox_light_farm(place=place)
-    monitor_farm(max(60, until - time.time()), farm_pkgs, harvest=True)
+    res = monitor_farm(max(60, until - time.time()), farm_pkgs, harvest=True)
+    if res == "bypass":
+        # флаг НЕ трогаем — main() после нас заберёт его и сделает байпас,
+        # а сбор продолжится на остаток окна (окно ещё активно)
+        emit("harvest.end", reason="bypass_requested",
+             minutes_left=max(0, int((until - time.time()) // 60)))
+        log("🌾 Сбор прерван байпасом с дашборда — после байпаса сбор продолжится на остаток окна")
+        kill_all_roblox()
+        return
     emit("harvest.end")
     log("🌾 Сбор завершён — закрываю роблоксы, возвращаюсь к фарму")
     kill_all_roblox()
@@ -1432,7 +1481,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
@@ -1485,7 +1534,17 @@ def main():
         now = time.time()
         elapsed = now - state["last_key_time"]
 
-        if not FORCE_BYPASS and state["last_key_time"] > 0 and elapsed < BYPASS_COOLDOWN:
+        # 🔓 БАЙПАС ПО КНОПКЕ (v0.15): клиент (задача bypass.run) положил флаг —
+        # делаем ПОЛНЫЙ цикл v18.8 прямо сейчас, не дожидаясь кулдауна
+        bypass_now = consume_bypass_request() is not None
+        if bypass_now:
+            log("🔓 Байпас по кнопке (дашборд) — полный цикл v18.8: Delta → реклама → ZEN-API → ключ → license")
+            kill_all_roblox()
+            run_bypass_cycle()
+
+        if bypass_now:
+            pass  # байпас уже сделан выше — кулдаун свежий
+        elif not FORCE_BYPASS and state["last_key_time"] > 0 and elapsed < BYPASS_COOLDOWN:
             log(f"⏱️ Кулдаун: {elapsed/3600:.1f}ч / 24ч → ПРОПУСК байпаса")
         else:
             log("🔓 Кулдаун истёк → запускаю байпас (СРАЗУ в плейс через com.roblox.client)")

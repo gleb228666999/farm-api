@@ -57,6 +57,10 @@ def make_result(task_id: str, task: str, payload: dict) -> dict:
         data = {"ok": True, "note": "фарм вернётся к обычному циклу"}
     elif task == "rega.start":
         data = {"ok": True, "note": "рега запущена"}
+    elif task == "bypass.run":
+        data = {"ok": True, "farm_was_running": True, "farm_started": False,
+                "ts": time.time(), "source": (payload.get("source") or "dashboard"),
+                "note": "фарм выполнит полный байпас v18.8 ≤30с; события bypass.*"}
     elif task == "cookie.check":
         data = {"ok": True, "note": "проверка запущена в фоне"}
     return {"type": "result", "device_id": DEVICE_ID, "task_id": task_id, "data": data}

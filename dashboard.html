@@ -54,7 +54,7 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button class="big b" onclick="exe(selected)">💻 Exec</button>
 <button class="big g" title="перезапуск клиента на телефоне" onclick="restartCli(selected)">♻️ Restart</button>
 <button class="big r" title="полный стоп клиента и сервисов" onclick="haltCli(selected)">⛔ Halt</button>
-<div class="mut" style="margin-top:6px">🔓 БАЙПАС = сброс last_key_time в info/farm_state.json → фарм ⏹ → фарм ▶ (робот сразу продолжит без ожидания ключа)</div>
+<div class="mut" style="margin-top:6px">🔓 БАЙПАС (v0.15) = полный цикл v18.8 на телефоне: Delta → реклама → ZEN-API → ключ → license. Вылетевший клон при фарме/сборе сам перезапускается в плейс (проверка каждые 30с)</div>
 </div>
 
 <table><thead><tr><th>гр</th><th>Устройство</th><th>Модель</th><th>Батарея</th>
@@ -159,9 +159,20 @@ function exe(d){
 const RESET_KEY_CMD='python -c "import json,pathlib;p=pathlib.Path(\'info/farm_state.json\');d=json.loads(p.read_text()) if p.exists() else {};d[\'last_key_time\']=0;p.write_text(json.dumps(d))"';
 async function bypassSel(d){
   if(!d){show('❌ сначала кликни по устройству');return}
-  if(!confirm('🔓 БАЙПАС '+d+': сброс кулдауна ключа → фарм ⏹ → фарм ▶. Продолжить?'))return;
+  if(!confirm('🔓 БАЙПАС '+d+' (как в v18.8):\nDelta → реклама → ZEN-API → ключ → license\n+ вылетевшие клоны перезапускаются в плейс.\nПродолжить?'))return;
   selected=d;
-  show('🔓 Байпас '+d+': шаг 1/3 — сброс кулдауна ключа...');
+  show('🔓 Байпас '+d+': отправляю bypass.run...');
+  const t=await sendTask({type:'task',task:'bypass.run',payload:{source:'dashboard'}});
+  if(t){
+    const res=await waitResult(t.task_id,25000);
+    if(res&&res.data&&res.data.ok){
+      show('🔓 БАЙПАС '+d+' ЗАПУЩЕН ✓\n\nфарм на телефоне сейчас выполнит ПОЛНЫЙ цикл v18.8:\nDelta → реклама → ZEN-API → ключ → license (read-back)\n(≤30 сек если фарм жив; не жил — запущен автоматически)\n\nвылетевшие клоны перезапускаются в плейс мониторингом каждые 30с\n(и при фарме, и при сборе)\n\nсмотри 📅 События: bypass.ok / bypass.fail / farm.restart\n\n'+JSON.stringify(res.data,null,2).slice(0,1200));
+      return;
+    }
+    show('⚠️ bypass.run не поддержан (старый клиент? жми ⬆ Update) — переключаюсь на запасной способ...');
+    await new Promise(r=>setTimeout(r,2500));
+  }
+  show('🔓 Байпас '+d+' (запасной способ): шаг 1/3 — сброс кулдауна ключа...');
   const t1=await sendTask({type:'task',task:'exec',payload:{command:RESET_KEY_CMD,timeout:20}});
   if(t1){const r1=await waitResult(t1.task_id,25000);show(r1?'🔓 шаг 1/3 ✓ — кулдаун сброшен':'⏰ шаг 1/3: нет ответа exec');}
   await sleep(2000);
@@ -169,11 +180,11 @@ async function bypassSel(d){
   const t2=await sendTask({type:'task',task:'service.stop',payload:{name:'farm'}});
   if(t2){const r2=await waitResult(t2.task_id,30000);show(r2?'🔓 шаг 2/3 ✓ — фарм остановлен':'⏰ шаг 2/3: нет ответа');}
   await sleep(3000);
-  show('🔓 Байпас '+d+': шаг 3/3 — фарм ▶ (кулдаун 0 → байпас сразу)...');
+  show('🔓 Байпас '+d+': шаг 3/3 — фарм ▶ (старт → сразу полный байпас v18.8)...');
   const t3=await sendTask({type:'task',task:'service.start',payload:{name:'farm'}});
   if(!t3)return;
   const r3=await waitResult(t3.task_id,20000);
-  show('🔓 БАЙПАС '+d+' ГОТОВ ✓\nфарм перезапущен, кулдаун ключа = 0 → байпас сработает сразу.\nсмотри 📅 События: bypass.*\n\n'+(r3?JSON.stringify(r3.data,null,2).slice(0,1500):''));
+  show('🔓 БАЙПАС '+d+' ГОТОВ ✓\nфарм перезапущен → сам выполнит полный цикл v18.8 (Delta → ZEN-API → ключ → license).\nсмотри 📅 События: bypass.*\n\n'+(r3?JSON.stringify(r3.data,null,2).slice(0,1500):''));
 }
 function rega(d){
   if(!d){show('❌ сначала кликни по устройству');return}
