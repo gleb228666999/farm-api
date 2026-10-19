@@ -222,6 +222,40 @@ def set_portrait():
     run_su("settings put system accelerometer_rotation 1", timeout=5)
 
 
+def _current_rotation():
+    """0/2 = портрет, 1/3 = ландшафт. Читаем реальный поворот (dumpsys input, фолбэк dumpsys window)."""
+    ok, out, _ = run_su(
+        "dumpsys input | grep -i 'SurfaceOrientation' || dumpsys window | grep 'mRotation='",
+        timeout=5)
+    if not ok:
+        return ""
+    vals = re.findall(r'(?:SurfaceOrientation|mRotation)\s*[:=]\s*([0-9])', out)
+    return vals[-1] if vals else ""
+
+
+def force_landscape(reason=""):
+    """📱 v0.16: ОРИЕНТАЦИЯ ВСЕГДА ГОРИЗОНТАЛЬНАЯ.
+    Все координаты байпаса (Дельта + браузер) — ЛАНДШАФТНЫЕ. Chrome и система
+    сбрасывают поворот при переходе на сайт get key → клики промахиваются.
+    Выставляем user_rotation=1 + блокируем акселерометр и ПРОВЕРЯЕМ реальный
+    поворот по dumpsys; не повернулся — повторяем (до 3 раз)."""
+    if reason:
+        log(f"📱 {reason} → форсирую ЛАНДШАФТ")
+    for attempt in (1, 2, 3):
+        run_su("settings put system accelerometer_rotation 0", timeout=5)
+        run_su("settings put system user_rotation 1", timeout=5)
+        time.sleep(1.2)  # системе нужно время реально повернуть экран
+        orient = _current_rotation()
+        if orient in ("1", "3"):
+            if reason:
+                log(f"   ✅ Ландшафт подтверждён (orient={orient})")
+            return True
+        if attempt < 3:
+            log(f"   ⚠️ Поворот не применился (orient={orient or '?'}) — повтор {attempt + 1}/3")
+    log("   ⚠️ Ландшафт не подтвердился dumpsys, но настройки выставлены — продолжаю")
+    return False
+
+
 def wake_screen():
     ok, out, _ = run_su("dumpsys power | grep 'mWakefulness='", timeout=5)
     if ok and "mWakefulness=Awake" in out:
@@ -320,7 +354,7 @@ def graceful_stop(reason: str):
         log(f"⚠️ зачистка роблоксов: {e}")
         closed = -1
     try:
-        set_portrait()   # байпас мог оставить ландшафт — вернуть портрет
+        force_landscape("Стоп фарма")   # v0.16: ориентация ВСЕГДА горизонтальная
     except Exception:
         pass
     try:
@@ -1070,6 +1104,7 @@ _CLIP_PARCEL_CMDS = (
 
 
 def get_copied_key():
+    force_landscape("Чтение ключа в браузере")   # 🆕 v0.16: омнибокс-тап по ландшафтным координатам
     time.sleep(2)
 
     t = termux_clipboard_get()
@@ -1200,6 +1235,7 @@ def zen_bypass(original_link, _retry=0):
 def inject_url_via_ui(url):
     if not url:
         return False
+    force_landscape("Переход на сайт bypass")   # 🆕 v0.16: браузер всегда горизонтально
     log(f"🌐 Открываю bypass-ссылку ({len(url)} символов)...")
     host = re.sub(r'^https?://', '', url).split('/')[0].split(':')[0].lower()
 
@@ -1208,6 +1244,7 @@ def inject_url_via_ui(url):
     if ok:
         log("   ✅ am start выполнен, жду загрузку...")
         time.sleep(5)
+        force_landscape("Браузер открыт")   # 🆕 v0.16: Chrome мог сбросить поворот при открытии
         if any(host in t.lower() for t in get_visible_text()):
             log(f"   ✅ Домен {host} на экране — страница открыта")
             return True
@@ -1356,10 +1393,12 @@ def run_bypass_attempt(attempt, total, use_double_click=False):
     try:
         kill_all_roblox()
         wake_screen()
+        force_landscape("Байпас: старт попытки")   # 🆕 v0.16: ландшафт ДО запуска Дельты
         launch_delta()
         log(f"⏳ Ждем {UI_INITIAL_DELAY}с загрузки MM2...")
         time.sleep(UI_INITIAL_DELAY)
 
+        force_landscape("Клик GET KEY в Дельте")   # 🆕 v0.16: координаты ЛАНДШАФТНЫЕ — поворот ДО клика
         tap(*LINK_TAP, UI_STEP_DELAYS["LINK_TAP"], "LINK_TAP")
         set_landscape()
         time.sleep(UI_STEP_DELAYS["SET_LANDSCAPE"])
@@ -1384,37 +1423,34 @@ def run_bypass_attempt(attempt, total, use_double_click=False):
         if copied_link:
             log(f"📋 Исходная ссылка: {copied_link[:70]}")
         if not copied_link or not _looks_like_url(copied_link):
-            log("⚠️ Ссылка не получена, повтор...")
-            set_portrait()
+            log("⚠️ Ссылка не получена, повтор (ландшафт НЕ сбрасываю — v0.16 всегда горизонтально)...")
             time.sleep(3)
             return None
         copied_link = _normalize_url(copied_link)
 
         zen = zen_bypass(copied_link)
         if not zen:
-            log("❌ API не дал результат, повтор...")
-            set_portrait()
+            log("❌ API не дал результат, повтор (ландшафт НЕ сбрасываю — v0.16 всегда горизонтально)...")
             time.sleep(5)
             return None
         kind, value = zen
 
         if kind == "key":
             log(f"🎯 API отдал КЛЮЧ напрямую: {value[:50]}...")
-            set_portrait()
             kill_all_roblox()
             time.sleep(2)
             return value
 
         log(f"✅ Bypass-ссылка: {value[:60]}... ({len(value)} символов)")
         if not inject_url_via_ui(value):
-            log("⚠️ URL не открылся, повтор...")
-            set_portrait()
+            log("⚠️ URL не открылся, повтор (ландшафт НЕ сбрасываю — v0.16 всегда горизонтально)...")
             time.sleep(3)
             return None
 
         log(f"⏳ {UI_STEP_DELAYS['OPEN_ZEN_LINK']}с загрузки страницы...")
         time.sleep(UI_STEP_DELAYS["OPEN_ZEN_LINK"])
 
+        force_landscape("Сайт GET KEY: клики по сайту")   # 🆕 v0.16: браузер всегда горизонтально
         tap(*CONTINUE_KEY, UI_STEP_DELAYS["CONTINUE_KEY"], "CONTINUE_KEY")
         tap(*CLOSE_TRANSL_2, UI_STEP_DELAYS["CLOSE_TRANSL_2"], "CLOSE_TRANSL_2")
         tap(*COPY_CODE, UI_STEP_DELAYS["COPY_CODE"], "COPY_CODE")
@@ -1423,7 +1459,6 @@ def run_bypass_attempt(attempt, total, use_double_click=False):
         time.sleep(3)
         key = get_copied_key()
 
-        set_portrait()
         kill_all_roblox()
         time.sleep(2)
 
@@ -1434,8 +1469,7 @@ def run_bypass_attempt(attempt, total, use_double_click=False):
 
         return key
     except SystemExit:
-        # фарм ⏹ (SIGTERM): вернуть портрет и выйти — телефон остаётся чистым
-        set_portrait()
+        # фарм ⏹ (SIGTERM): выходим, ландшафт НЕ трогаем (v0.16: всегда горизонтально)
         raise
 
 
@@ -1467,8 +1501,7 @@ def run_bypass_cycle():
                 return True
             log("⚠️ Ключ НЕ записан в license — попытка не засчитана")
 
-    log(f"💥 Все {total} попыток байпасса провалены")
-    set_portrait()
+    log(f"💥 Все {total} попыток байпасса провалены (ландшафт остаётся — v0.16)")
     kill_all_roblox()
     emit("bypass.fail", retries=total)
     return False
@@ -1481,7 +1514,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run + всегда ландшафт v0.16, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")

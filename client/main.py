@@ -40,6 +40,14 @@
         ПОЛНЫЙ цикл (Delta → реклама → ZEN-API → ключ → license) БЕЗ рестарта
         сервиса; если фарм не жил — сам запускается и сразу байпасит;
         вылетевшие клоны при фарме И при сборе мониторинг перезапускает в плейс
+- v0.16: (в сервисах) байпас — ОРИЕНТАЦИЯ ВСЕГДА ГОРИЗОНТАЛЬНАЯ: все координаты
+        байпаса ландшафтные, но поворот ставился ПОСЛЕ клика Get Key в Дельте,
+        а Chrome при переходе на сайт сбрасывал его в портрет → клики
+        промахивались. Теперь force_landscape() ставит user_rotation=1 +
+        ПРОВЕРЯЕТ реальный поворот по dumpsys (3 повтора) на ВСЕХ этапах:
+        старт попытки, ДО клика Get Key в Дельте, открытие сайта, перед кликами
+        по сайту, чтение ключа; сбросы в портрет из байпаса убраны — ландшафт
+        держится от начала до конца
 """
 import sys
 import os
@@ -67,7 +75,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.15"
+VERSION = "0.16"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
