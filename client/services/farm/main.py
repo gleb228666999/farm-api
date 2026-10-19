@@ -831,6 +831,77 @@ def total_sessions():
     return n
 
 
+def _roblox_auth_check(cookie):
+    """API Roblox: жива ли кука. "ok"/"dead"(401)/"error"(сеть и пр.) — порт fetch_user_info_full из рега."""
+    try:
+        req = urllib.request.Request(
+            "https://users.roblox.com/v1/users/authenticated",
+            headers={"Cookie": f".ROBLOSECURITY={cookie}", "User-Agent": "Roblox/Win32"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            if r.status == 200:
+                d = json.loads(r.read().decode())
+                return "ok", d.get("id"), d.get("name")
+            return "error", None, None
+    except urllib.error.HTTPError as e:
+        return ("dead", None, None) if e.code == 401 else ("error", None, None)
+    except Exception:
+        return "error", None, None
+
+
+def read_main_cookie():
+    """🍪 v0.17: значение .ROBLOSECURITY с ГЛАВНОГО Roblox (Дельта) или None."""
+    for db in _cookie_db_candidates(PACKAGE_MAIN):
+        if not run_su(f"test -f '{db}'")[0]:
+            continue
+        _copy_check_db(db)
+        con = None
+        try:
+            con = sqlite3.connect(CHECK_DB)
+            has = con.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                              "AND name='cookies'").fetchone()
+            if not has:
+                continue
+            for r in con.execute("SELECT value FROM cookies "
+                                 "WHERE name='.ROBLOSECURITY'").fetchall():
+                v = (r[0] or "").strip()
+                if len(v) > 40:
+                    return v
+        except Exception:
+            pass
+        finally:
+            if con:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+            _clean_check_db()
+    return None
+
+
+def main_cookie_valid():
+    """🍪 v0.17: на главном Roblox есть ЖИВОЙ акк (кука есть И API отвечает 200).
+    Одного наличия куки мало: протухшая/разлогиненная кука проходит has_session,
+    но Дельта с ней на плейс НЕ зайдёт → байпас вхолостую.
+    Ошибка сети/чтения → True (не блокируем байпас из-за самой проверки)."""
+    try:
+        cookie = read_main_cookie()
+    except Exception as e:
+        log(f"⚠️ Чтение куки главного Roblox упало ({e}) — пропускаю проверку")
+        return True
+    if not cookie:
+        log("🍪 Главный Roblox (Дельта): куки НЕТ вовсе → акка нет")
+        return False
+    status, uid, name = _roblox_auth_check(cookie)
+    if status == "ok":
+        log(f"🍪 Главный Roblox: акк ЖИВОЙ ({name}, id {uid})")
+        return True
+    if status == "dead":
+        log("🍪 Главный Roblox: кука есть, но ПРОТУХЛА (API 401) — акка фактически нет")
+        return False
+    log("🍪 Главный Roblox: не удалось проверить куку (сеть/timeout) — не блокирую")
+    return True
+
+
 def missing_cookies_reason():
     """🍪 None — кук достаточно для байпаса и фарма.
     Иначе строка-причина, по которой нужна авторегистрация:
@@ -1476,6 +1547,15 @@ def run_bypass_attempt(attempt, total, use_double_click=False):
 def run_bypass_cycle():
     """🚀 Цикл байпаса v18.8: 6 обычных + 3 с двойным кликом = 9 попыток."""
     total = BYPASS_CLICK_RETRIES + BYPASS_DBLCLICK_RETRIES
+
+    # 🍪 v0.17: без ЖИВОГО акка на главном Roblox Дельта не зайдёт на плейс —
+    # 9 попыток вхолостую не тратим, сразу сигнал что нужна рега/починка кук
+    if not main_cookie_valid():
+        log("🍪 БАЙПАС ОТМЕНЁН: на главном Roblox нет живого акка (без него на плейс не зайти)")
+        emit("bypass.no_account", reason="нет живой куки на главном Roblox — без акка на плейс не зайти")
+        emit("bypass.fail", retries=0, reason="no_account_main")
+        return False
+
     emit("bypass.start", attempts=total)
     log(f"🚀 ЦИКЛ БАЙПАСА: {BYPASS_CLICK_RETRIES} обычных + {BYPASS_DBLCLICK_RETRIES} двойных = {total} попыток")
 
@@ -1514,7 +1594,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run + всегда ландшафт v0.16, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run + ландшафт + гейт живого акка v0.17, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
@@ -1567,22 +1647,37 @@ def main():
         now = time.time()
         elapsed = now - state["last_key_time"]
 
-        # 🔓 БАЙПАС ПО КНОПКЕ (v0.15): клиент (задача bypass.run) положил флаг —
-        # делаем ПОЛНЫЙ цикл v18.8 прямо сейчас, не дожидаясь кулдауна
+        # 🔓 БАЙПАС (кнопка v0.15 / кулдаун) + 🍪 ГЕЙТ ЖИВОГО АККА (v0.17):
+        # флаг кнопки НЕ забираем до проверки — если акка нет, флаг остаётся,
+        # рега чинит куки и байпас выполнится сам на следующем проходе
+        cooldown_left = (not FORCE_BYPASS and state["last_key_time"] > 0
+                         and elapsed < BYPASS_COOLDOWN)
+        if bypass_requested() or not cooldown_left:
+            try:
+                main_ok = main_cookie_valid()
+            except Exception as e:
+                log(f"⚠️ Проверка акка главного Roblox упала ({e}) — веду как раньше")
+                main_ok = True
+            if not main_ok:
+                log("🍪 Главный Roblox без живого акка — байпас ОТЛОЖЕН, запускаю регу акков")
+                try:
+                    handle_no_cookies("нет живой куки на главном Roblox перед байпасом")
+                except Exception as e:
+                    log(f"💥 Куки-гейт перед байпасом упал: {e}")
+                    time.sleep(300)
+                continue  # флаг байпаса не тронут — выполнится после рега
+
         bypass_now = consume_bypass_request() is not None
         if bypass_now:
             log("🔓 Байпас по кнопке (дашборд) — полный цикл v18.8: Delta → реклама → ZEN-API → ключ → license")
             kill_all_roblox()
             run_bypass_cycle()
-
-        if bypass_now:
-            pass  # байпас уже сделан выше — кулдаун свежий
-        elif not FORCE_BYPASS and state["last_key_time"] > 0 and elapsed < BYPASS_COOLDOWN:
-            log(f"⏱️ Кулдаун: {elapsed/3600:.1f}ч / 24ч → ПРОПУСК байпаса")
-        else:
+        elif not cooldown_left:
             log("🔓 Кулдаун истёк → запускаю байпас (СРАЗУ в плейс через com.roblox.client)")
             if not run_bypass_cycle():
                 log("💥 Байпас провален, но продолжаю фарм")
+        else:
+            log(f"⏱️ Кулдаун: {elapsed/3600:.1f}ч / 24ч → ПРОПУСК байпаса")
 
         kill_all_roblox()
         farm_pkgs = launch_roblox_light_farm()

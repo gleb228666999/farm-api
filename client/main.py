@@ -48,6 +48,13 @@
         старт попытки, ДО клика Get Key в Дельте, открытие сайта, перед кликами
         по сайту, чтение ключа; сбросы в портрет из байпаса убраны — ландшафт
         держится от начала до конца
+- v0.17: (в сервисах) ГЕЙТ ЖИВОГО АККА ПЕРЕД БАЙПАСОМ: has_session считал
+        акком и ПРОТУХШУЮ куку → байпас стартовал вхолостую (без акка Дельта
+        не заходит на плейс, 9 попыток в мусор). Теперь read_main_cookie()
+        достаёт .ROBLOSECURITY главного Roblox, а _roblox_auth_check()
+        проверяет её через users.roblox.com (401 = мертва). Нет живого акка →
+        bypass.no_account + bypass.fail ДО попыток; флаг кнопки НЕ тратится —
+        рега чинит куки и байпас выполнится сам на следующем проходе
 """
 import sys
 import os
@@ -75,7 +82,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.16"
+VERSION = "0.17"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
