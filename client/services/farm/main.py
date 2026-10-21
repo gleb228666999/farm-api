@@ -168,6 +168,7 @@ HARVEST_WINDOW_FILE = FARM_BASE / "info" / "harvest_window.json"
 # 🔓 флаг байпаса по кнопке: пишет КЛИЕНТ (задача bypass.run с сервера/дашборда),
 # фарм забирает его и делает ПОЛНЫЙ цикл v18.8 (Delta → ZEN-API → ключ → license)
 BYPASS_FORCE_FILE = FARM_BASE / "info" / "bypass_force.json"
+BYPASS_FLAG_TTL = 12 * 3600   # 🆕 v0.18: кнопка «живёт» 12ч — застрявший флаг не гоняет байпас вечно
 
 state = {"last_key_time": 0.0}
 
@@ -233,14 +234,21 @@ def _current_rotation():
     return vals[-1] if vals else ""
 
 
-def force_landscape(reason=""):
+def force_landscape(reason="", verify=True):
     """📱 v0.16: ОРИЕНТАЦИЯ ВСЕГДА ГОРИЗОНТАЛЬНАЯ.
     Все координаты байпаса (Дельта + браузер) — ЛАНДШАФТНЫЕ. Chrome и система
     сбрасывают поворот при переходе на сайт get key → клики промахиваются.
     Выставляем user_rotation=1 + блокируем акселерометр и ПРОВЕРЯЕМ реальный
-    поворот по dumpsys; не повернулся — повторяем (до 3 раз)."""
+    поворот по dumpsys; не повернулся — повторяем (до 3 раз).
+    🆕 v0.18: verify=False — быстрая версия (только 2 settings-команды, без
+    dumpsys и повторов) для путей с жёстким бюджетом времени (graceful_stop ≤25с:
+    полная проверка в худшем случае ≈50с → фарм убили бы SIGKILL посреди зачистки)."""
     if reason:
         log(f"📱 {reason} → форсирую ЛАНДШАФТ")
+    if not verify:
+        run_su("settings put system accelerometer_rotation 0", timeout=3)
+        run_su("settings put system user_rotation 1", timeout=3)
+        return True
     for attempt in (1, 2, 3):
         run_su("settings put system accelerometer_rotation 0", timeout=5)
         run_su("settings put system user_rotation 1", timeout=5)
@@ -354,7 +362,7 @@ def graceful_stop(reason: str):
         log(f"⚠️ зачистка роблоксов: {e}")
         closed = -1
     try:
-        force_landscape("Стоп фарма")   # v0.16: ориентация ВСЕГДА горизонтальная
+        force_landscape("Стоп фарма", verify=False)   # v0.16+18: ландшафт, БЕЗ dumpsys — бюджет 25с
     except Exception:
         pass
     try:
@@ -426,12 +434,30 @@ def harvest_window():
 
 
 def bypass_requested() -> bool:
-    """🔓 Кнопка байпаса на дашборде (клиент пишет bypass_force.json)?"""
-    return BYPASS_FORCE_FILE.is_file()
+    """🔓 Кнопка байпаса на дашборде (клиент пишет bypass_force.json)?
+    🆕 v0.18: протухший (>12ч) флаг удаляем и игнорируем — не вечный цикл."""
+    try:
+        if not BYPASS_FORCE_FILE.is_file():
+            return False
+        data = json.loads(BYPASS_FORCE_FILE.read_text())
+        ts = float(data.get("ts") or 0) if isinstance(data, dict) else 0
+    except Exception:
+        return True   # прочитать не вышло — пусть consume разберётся
+    if ts and time.time() - ts > BYPASS_FLAG_TTL:
+        log(f"🗑 Флаг байпаса протух (>{BYPASS_FLAG_TTL // 3600}ч) — удаляю, не выполняю")
+        try:
+            BYPASS_FORCE_FILE.unlink()
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def consume_bypass_request():
-    """Забрать флаг байпаса (атомарно: прочитали → удалили). None = флага нет."""
+    """Забрать флаг байпаса (атомарно: прочитали → удалили). None = флага нет.
+    🆕 v0.18: если удалить не удалось — вернём None. Раньше возвращали «флаг
+    забран», хотя файл оставался на диске → байпас запускался заново каждый
+    проход цикла (вечный круг без остановки)."""
     try:
         data = json.loads(BYPASS_FORCE_FILE.read_text())
     except Exception:
@@ -440,8 +466,13 @@ def consume_bypass_request():
         BYPASS_FORCE_FILE.unlink()
     except FileNotFoundError:
         return None
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"⚠️ Флаг байпаса не удаётся удалить ({e}) — НЕ запускаю (иначе вечный цикл)")
+        return None
+    ts = float(data.get("ts") or 0) if isinstance(data, dict) else 0
+    if ts and time.time() - ts > BYPASS_FLAG_TTL:
+        log(f"🗑 Флаг байпаса протух (>{BYPASS_FLAG_TTL // 3600}ч) — не выполняю")
+        return None
     return data
 
 
@@ -744,13 +775,16 @@ def run_harvest_session(hw):
     farm_pkgs = launch_roblox_light_farm(place=place)
     res = monitor_farm(max(60, until - time.time()), farm_pkgs, harvest=True)
     if res == "bypass":
-        # флаг НЕ трогаем — main() после нас заберёт его и сделает байпас,
-        # а сбор продолжится на остаток окна (окно ещё активно)
+        # 🆕 v0.18: возвращаем "bypass" — main() СЕЙЧАС съест флаг и сделает байпас,
+        # потом сбор продолжится на остаток окна (окно ещё активно).
+        # Раньше возвращали None: main() не знал про флаг → снова запуск сбора →
+        # монитор снова видел флаг → вечный круг «сбор→монитор→bypass» и кнопка
+        # байпаса не работала, пока активно окно сбора.
         emit("harvest.end", reason="bypass_requested",
              minutes_left=max(0, int((until - time.time()) // 60)))
-        log("🌾 Сбор прерван байпасом с дашборда — после байпаса сбор продолжится на остаток окна")
+        log("🌾 Сбор прерван байпасом с дашборда — сейчас байпас, потом сбор продолжится")
         kill_all_roblox()
-        return
+        return "bypass"
     emit("harvest.end")
     log("🌾 Сбор завершён — закрываю роблоксы, возвращаюсь к фарму")
     kill_all_roblox()
@@ -1042,6 +1076,15 @@ def handle_no_cookies(reason="нет кук"):
         left = missing_cookies_reason()
     except Exception:
         left = None
+    # 🆕 v0.18: НАЛИЧИЯ куки мало — протухшая кука main проходит has_session,
+    # и handle отчитывался успехом → фарм крутил «рега↔гейт» по кругу не понимая,
+    # что чинить. Главный акк проверяем ЧЕСТНО (через Roblox API).
+    if left is None:
+        try:
+            if not main_cookie_valid():
+                left = "главный Roblox без живого акка (кука протухла)"
+        except Exception:
+            left = None
     if left is None:
         log(f"✅ Куки есть (сессий {total_sessions()}) — продолжаю: байпас → фарм")
         emit("farm.rega_done", sessions=total_sessions())
@@ -1050,6 +1093,63 @@ def handle_no_cookies(reason="нет кук"):
             f"{REGA_RETRY_PAUSE // 60} мин и новая попытка")
         emit("farm.rega_empty", reason=left[:120])
         time.sleep(REGA_RETRY_PAUSE)
+
+
+def _bypass_gate_ok():
+    """🍪 v0.18: True — акк главного Roblox жив, байпас можно делать.
+    False — акка нет: рега запущена/отработала, ждём (флаг кнопки НЕ трогаем).
+    Счётчик подряд неудачных починок (защита от вечного круга «рега↔гейт»,
+    когда рега не может дать живую куку — пул пуст/регистрация не идёт):
+      3 подряд → пауза 2ч, чтобы не гонять регу впустую;
+      6 подряд → считаем акк неспасаемым сейчас, сбрасываем флаг кнопки и
+                 живём дальше (фарм клонами работает и без байпаса)."""
+    try:
+        main_ok = main_cookie_valid()
+    except Exception as e:
+        log(f"⚠️ Проверка акка главного Roblox упала ({e}) — веду как раньше")
+        return True
+    if main_ok:
+        if state.get("no_cookie_fails"):
+            state["no_cookie_fails"] = 0
+            save_state()
+        return True
+
+    log("🍪 Главный Roblox без живого акка — байпас ОТЛОЖЕН, запускаю регу акков")
+    try:
+        handle_no_cookies("нет живой куки на главном Roblox перед байпасом")
+    except Exception as e:
+        log(f"💥 Куки-гейт перед байпасом упал: {e}")
+        time.sleep(300)
+
+    # починка кончилась — проверяем ЧЕСТНО: кука ожила?
+    try:
+        still_dead = not main_cookie_valid()
+    except Exception:
+        still_dead = False
+    if not still_dead:
+        state["no_cookie_fails"] = 0
+        save_state()
+        return False   # кука ожила — но на этом проходе байпас не делаем, следующий пройдёт гейт без рега
+
+    fails = state.get("no_cookie_fails", 0) + 1
+    state["no_cookie_fails"] = fails
+    save_state()
+    if fails >= 6:
+        log("🧯 Акк главного Roblox не спасён 6 починок подряд — сбрасываю флаг байпаса, "
+            "продолжаю без него (фарм клонами не зависит от байпаса)")
+        emit("bypass.flag_dropped", fails=fails,
+             reason="акк главного Roblox не починен за 6 рег — флаг кнопки сброшен")
+        try:
+            BYPASS_FORCE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        state["no_cookie_fails"] = 0
+        save_state()
+    elif fails >= 3:
+        log(f"🧯 Починок без живого акка подряд: {fails}/6 — пауза 2ч, чтобы не гонять регу впустую")
+        emit("farm.no_cookies_stuck", fails=fails)
+        time.sleep(7200)
+    return False
 
 
 # ==========================================
@@ -1594,7 +1694,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run + ландшафт + гейт живого акка v0.17, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run + ландшафт + гейт акка + анти-лупы v0.18, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
@@ -1636,12 +1736,21 @@ def main():
         # 🌾 ОКНО СБОРА: сервер назначил (20:00 МСК) — сначала сбор
         hw = harvest_window()
         if hw:
+            res = None
             try:
-                run_harvest_session(hw)
+                res = run_harvest_session(hw)
             except Exception as e:
                 log(f"💥 Сбор упал: {e}")
                 emit("harvest.fail", error=str(e)[:200])
                 kill_all_roblox()
+            if res == "bypass":
+                # 🔓 v0.18: сбор прерван кнопкой — байпас СЕЙЧАС. Раньше флаг
+                # не съедался здесь → сбор запускался снова → монитор снова
+                # видел флаг → вечный круг, байпас не выполнялся никогда.
+                if _bypass_gate_ok():
+                    if consume_bypass_request() is not None:
+                        log("🔓 Байпас по кнопке ПРЯМО ВО ВРЕМЯ окна сбора...")
+                        run_bypass_cycle()
             continue
 
         now = time.time()
@@ -1653,18 +1762,7 @@ def main():
         cooldown_left = (not FORCE_BYPASS and state["last_key_time"] > 0
                          and elapsed < BYPASS_COOLDOWN)
         if bypass_requested() or not cooldown_left:
-            try:
-                main_ok = main_cookie_valid()
-            except Exception as e:
-                log(f"⚠️ Проверка акка главного Roblox упала ({e}) — веду как раньше")
-                main_ok = True
-            if not main_ok:
-                log("🍪 Главный Roblox без живого акка — байпас ОТЛОЖЕН, запускаю регу акков")
-                try:
-                    handle_no_cookies("нет живой куки на главном Roblox перед байпасом")
-                except Exception as e:
-                    log(f"💥 Куки-гейт перед байпасом упал: {e}")
-                    time.sleep(300)
+            if not _bypass_gate_ok():
                 continue  # флаг байпаса не тронут — выполнится после рега
 
         bypass_now = consume_bypass_request() is not None
