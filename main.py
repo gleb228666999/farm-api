@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.5
+🚜 Farm Server v0.6
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
@@ -8,7 +8,10 @@
 - /api/events              события фарма из SQLite (этап 2)
 - /api/groups              группы устройств (этап 4) + send в группу
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь/архив)
-- /api/schedule            ⏰ расписание: рега ежедневно + сбор в 20:00 МСК (2×20 мин)
+- /api/schedule            ⏰ расписание: рега ежедневно + сбор по времени МСК (2 пачки)
+-                          v0.6: фармеры = все онлайн-устройства кроме сборщиков (не только
+-                          цифровые id); день помечается только при реальном старте;
+-                          spawn_bg (GC не убивает задачи); валидация ЧЧ:ММ; честные ответы кнопок
 - /                        дашборд (dashboard.html)
 - v0.15: /api/devices/{id}/send, /api/broadcast, /api/groups/{name}/send —
           type:"task" ставится АВТОМАТИЧЕСКИ (клиент отвечает только на type=task)
@@ -37,6 +40,28 @@ RESULTS_TTL = 3600
 
 devices: dict = {}   # device_id -> {"ws","queue","info","client_version","last_seen","connected_at"}
 results: dict = {}   # task_id   -> {"status","data","device_id","ts"}
+
+# фоновые задачи (рега/сбор/планировщик): ДЕРЖИМ ССЫЛКУ — create_task без ссылки
+# собирается GC-ом и задача молча умирает посреди работы (документированная ловушка)
+_BG_TASKS: set = set()
+
+
+def spawn_bg(coro) -> asyncio.Task:
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
+
+# фоновые задачи (рега/сбор/планировщик): ДЕРЖИМ ССЫЛКУ — create_task без ссылки
+# собирается GC-ом и задача молча умирает посреди работы (документированная ловушка)
+_BG_TASKS: set = set()
+
+
+def spawn_bg(coro) -> asyncio.Task:
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
 
 
 # ---------- SQLite (этапы 2+4) ----------
@@ -626,11 +651,14 @@ async def api_pool_report(body: dict):
 
 
 # ============================================================
-# ⏰ РАСПИСАНИЕ (v0.5): рега ежедневно + сбор урожая в 20:00 МСК
+# ⏰ РАСПИСАНИЕ (v0.6): рега ежедневно + сбор урожая по времени МСК
 # ============================================================
-# Фармеры: device_id = "0".."29" (0-9 → collector-1, 10-19 → collector-2, 20-29 → collector-3)
+# Фармеры = ВСЕ онлайн-устройства КРОМЕ сборщиков (рекомендуемые имена "0".."29",
+# но подходит любой device_id — и phone_xxxxxx от bootstrap тоже).
 # Сборщики: device_id = "collector-1/2/3"
 # Сбор: 2 пачки × batch_minutes (по умолчанию 20 мин) — всего 40 мин.
+# Попытка дня сгорает только если запуск РЕАЛЬНО начался; если устройств не было
+# онлайн — планируемщик повторяет попытку в течение CATCHUP_MIN после времени.
 
 SCHEDULE_FILE = BASE_DIR / "schedule.json"
 SCHEDULE_STATE = BASE_DIR / "schedule_state.json"
@@ -685,13 +713,38 @@ def device_online(did: str) -> bool:
     return bool(d and now() - d["last_seen"] < 90)
 
 
+def is_collector(did: str) -> bool:
+    return did.startswith("collector-")
+
+
+def _farm_sort_key(d: str):
+    n = farmer_num(d)
+    return (0, n, "") if n is not None else (1, 0, d)
+
+
 def farmers_online() -> list:
-    return sorted([did for did in devices if farmer_num(did) is not None and device_online(did)],
-                  key=lambda d: farmer_num(d))
+    """ВСЕ онлайн-устройства кроме сборщиков и анонимов.
+    Раньше требовались ЧИСТО ЦИФРОВЫЕ device_id ("0".."29"), а bootstrap выдаёт
+    phone_xxxxxx → фармеров было 0 всегда, и весь блок расписания молча бездействовал."""
+    return sorted(
+        [did for did in devices
+         if device_online(did) and not is_collector(did) and not did.startswith("anon_")],
+        key=_farm_sort_key)
+
+
+def farmers_total() -> list:
+    """Все известные фармеры (включая офлайн) — для «онлайн X/Y» в дашборде"""
+    return sorted([did for did in devices
+                   if not is_collector(did) and not did.startswith("anon_")],
+                  key=_farm_sort_key)
 
 
 def collectors_online() -> list:
-    return sorted([did for did in devices if did.startswith("collector-") and device_online(did)])
+    return sorted([did for did in devices if is_collector(did) and device_online(did)])
+
+
+def collectors_total() -> list:
+    return sorted([did for did in devices if is_collector(did)])
 
 
 async def send_task(did: str, task: str, payload: dict = None):
@@ -707,15 +760,18 @@ async def send_task(did: str, task: str, payload: dict = None):
 
 async def orchestrate_rega():
     """Рега на всех онлайн-фармерах: farm ⏹ → пауза → rega.start.
-    Когда телефон закончит, он сам поднимет фарм (watchdog) + пришлёт rega.done."""
+    Когда телефон закончит, он сам поднимет фарм (watchdog) + пришлёт rega.done.
+    День (last_rega) помечается ТОЛЬКО если запуск реально начался — иначе
+    попытка не сгорает и планировщик повторит в течение catchup-окна."""
     cfg = load_schedule()
     farmers = farmers_online()
     if not farmers:
-        log("[🆕] Рега: нет онлайн-фармеров — пропуск")
+        log("[🆕] Рега: нет онлайн-фармеров — день НЕ помечен, попробуем снова")
         return {"sent": []}
     st = load_sched_state()
     st["rega_pending"] = farmers
     st["rega_started"] = now()
+    st["last_rega"] = datetime.now(MSK).strftime("%Y-%m-%d")
     save_sched_state(st)
     log(f"[🆕] Рега: farm ⏹ на {len(farmers)}: {', '.join(farmers)}")
     for did in farmers:
@@ -730,16 +786,20 @@ async def orchestrate_rega():
     return {"sent": sent}
 
 
-async def harvest_flow():
-    """🌾 Сбор урожая: сборщики на 40 мин, фармеры 2 пачками по 20 мин."""
+async def harvest_flow() -> bool:
+    """🌾 Сбор урожая: сборщики на 40 мин, фармеры 2 пачками по 20 мин.
+    День (last_harvest) помечается ТОЛЬКО если запуск реально начался."""
     cfg = load_schedule()
     mins = max(1, int(cfg.get("batch_minutes", 20)))
     place = cfg.get("harvest_place_id") or ""
     farmers = farmers_online()
     collectors = collectors_online()
     if not farmers and not collectors:
-        log("[🌾] Сбор: нет устройств — пропуск")
-        return
+        log("[🌾] Сбор: нет устройств — день НЕ помечен, попробуем снова")
+        return False
+    st = load_sched_state()
+    st["last_harvest"] = datetime.now(MSK).strftime("%Y-%m-%d")
+    save_sched_state(st)
     mid = (len(farmers) + 1) // 2               # нечётное число → лишний в пачке 1 (старт сразу)
     b1, b2 = farmers[:mid], farmers[mid:]
     log(f"[🌾] Сбор {mins}+{mins} мин: пачка1={b1 or '—'} | пачка2={b2 or '—'} | сборщики={collectors}")
@@ -756,22 +816,31 @@ async def harvest_flow():
         await send_task(did, "harvest.stop", {})
     for did in farmers:
         await send_task(did, "harvest.stop", {})
-    log("[🌾] Сбор завершён — farm продолжает обычный цикл")
+    log("[🌾] Сбор завершён — фарм продолжает обычный цикл")
+    return True
+
+
+def _valid_hhmm(hhmm: str) -> bool:
+    """Строго ЧЧ:ММ (00-23:00-59). Раньше проходило «25:99» и расписание
+    молча никогда не срабатывало."""
+    try:
+        h, m = map(int, str(hhmm).split(":"))
+        return 0 <= h <= 23 and 0 <= m <= 59
+    except Exception:
+        return False
 
 
 def _hhmm_passed(now_msk: datetime, hhmm: str) -> bool:
-    try:
-        h, m = map(int, str(hhmm).split(":"))
-    except Exception:
+    if not _valid_hhmm(hhmm):
         return False
+    h, m = map(int, str(hhmm).split(":"))
     return (now_msk.hour, now_msk.minute) >= (h, m)
 
 
 def _within_catchup(now_msk: datetime, hhmm: str) -> bool:
-    try:
-        h, m = map(int, str(hhmm).split(":"))
-    except Exception:
+    if not _valid_hhmm(hhmm):
         return False
+    h, m = map(int, str(hhmm).split(":"))
     delta = (now_msk.hour * 60 + now_msk.minute) - (h * 60 + m)
     return 0 <= delta <= CATCHUP_MIN
 
@@ -790,22 +859,25 @@ async def schedule_loop():
                     log(f"[🆕] Рега висит >4ч — принудительно farm ▶: {st['rega_pending']}")
                     for did in st["rega_pending"]:
                         await send_task(did, "service.start", {"name": "farm"})
-                    st["rega_pending"] = []
-                    save_sched_state(st)
+                    # перечитываем state перед записью — пока шли send_task,
+                    # ws-обработчик мог обновить rega_pending (гонка состояний)
+                    st2 = load_sched_state()
+                    st2["rega_pending"] = []
+                    save_sched_state(st2)
 
+                # день НЕ помечаем заранее — это делает orchestrate_rega()/harvest_flow()
+                # только при РЕАЛЬНОМ старте; если устройств не было онлайн, попытка
+                # повторится на следующем тике (пока не вышло catchup-окно)
                 if (_hhmm_passed(now_msk, cfg.get("rega_time", "03:00"))
                         and _within_catchup(now_msk, cfg.get("rega_time", "03:00"))
-                        and st.get("last_rega") != today):
-                    st["last_rega"] = today
-                    save_sched_state(st)
-                    asyncio.create_task(orchestrate_rega())
+                        and st.get("last_rega") != today
+                        and not st.get("rega_pending")):
+                    spawn_bg(orchestrate_rega())
 
                 if (_hhmm_passed(now_msk, cfg.get("harvest_time", "20:00"))
                         and _within_catchup(now_msk, cfg.get("harvest_time", "20:00"))
                         and st.get("last_harvest") != today):
-                    st["last_harvest"] = today
-                    save_sched_state(st)
-                    asyncio.create_task(harvest_flow())
+                    spawn_bg(harvest_flow())
 
                 if not st.get("rega_pending"):
                     interval_min = max(5, int(cfg.get("cookie_check_interval_min", 30)))
@@ -821,13 +893,14 @@ async def schedule_loop():
 
 @app.on_event("startup")
 async def _startup():
-    asyncio.create_task(schedule_loop())
+    spawn_bg(schedule_loop())
 
 
 @app.get("/api/schedule")
 async def api_schedule_get():
     return {"schedule": load_schedule(), "state": load_sched_state(),
-            "farmers_online": farmers_online(), "collectors_online": collectors_online()}
+            "farmers_online": farmers_online(), "collectors_online": collectors_online(),
+            "farmers_total": farmers_total(), "collectors_total": collectors_total()}
 
 
 @app.post("/api/schedule")
@@ -838,8 +911,8 @@ async def api_schedule_set(body: dict):
             cfg[k] = body[k]
     if "rega_time" in body or "harvest_time" in body:
         for k in ("rega_time", "harvest_time"):
-            if k in body and not re.match(r'^\d{1,2}:\d{2}$', str(body[k])):
-                raise HTTPException(400, f"{k} должен быть ЧЧ:ММ")
+            if k in body and not _valid_hhmm(body[k]):
+                raise HTTPException(400, f"{k} должен быть ЧЧ:ММ (00-23:00-59), например 03:00")
     save_schedule(cfg)
     log(f"[⏰] Расписание обновлено: {cfg}")
     return {"ok": True, "schedule": cfg}
@@ -847,19 +920,32 @@ async def api_schedule_set(body: dict):
 
 @app.post("/api/rega/start")
 async def api_rega_now():
-    """Кнопка «Рега сейчас» — вне расписания"""
-    asyncio.create_task(orchestrate_rega())
-    return {"ok": True, "note": "рега запускается (farm ⏹ → 30с → rega.start)"}
+    """Кнопка «Рега сейчас» — вне расписания. Честный ответ: если фармеров
+    онлайн нет — ok:false и список, а не безликое «запускается»"""
+    farmers = farmers_online()
+    if not farmers:
+        log("[🆕] Рега сейчас: нет онлайн-фармеров")
+        return {"ok": False, "farmers": [], "farmers_total": farmers_total(),
+                "note": "нет онлайн-фармеров — некому запускать регу"}
+    spawn_bg(orchestrate_rega())
+    return {"ok": True, "farmers": farmers,
+            "note": "рега запускается (farm ⏹ → 30с → rega.start)"}
 
 
 @app.post("/api/harvest/start")
 async def api_harvest_now():
-    """Кнопка «Сбор сейчас» — вне расписания"""
-    st = load_sched_state()
-    st["last_harvest"] = datetime.now(MSK).strftime("%Y-%m-%d")
-    save_sched_state(st)
-    asyncio.create_task(harvest_flow())
-    return {"ok": True, "note": "сбор запускается (2 пачки)"}
+    """Кнопка «Сбор сейчас» — вне расписания. last_harvest ставит сам
+    harvest_flow при реальном старте — клик «впустую» не сжигает день"""
+    farmers = farmers_online()
+    collectors = collectors_online()
+    if not farmers and not collectors:
+        log("[🌾] Сбор сейчас: нет онлайн-устройств")
+        return {"ok": False, "farmers": [], "collectors": [],
+                "farmers_total": farmers_total(), "collectors_total": collectors_total(),
+                "note": "нет онлайн-устройств — некому запускать сбор"}
+    spawn_bg(harvest_flow())
+    return {"ok": True, "farmers": farmers, "collectors": collectors,
+            "note": "сбор запускается (2 пачки)"}
 
 
 @app.post("/api/cookie/check")

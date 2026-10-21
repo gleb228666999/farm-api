@@ -85,7 +85,7 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button onclick="regaNow()">🆕 Рега сейчас</button>
 <button onclick="harvestNow()">🌾 Сбор сейчас</button>
 <button onclick="cookieCheckAll()">🍪 Проверка кук (все фармеры)</button>
-<div class="mut" style="margin-top:4px">фармеры: device_id 0–29 (0-9 → collector-1, 10-19 → collector-2, 20-29 → collector-3) · сбор = 2 пачки по N мин (фармеры пополам) · рега = 2×10 попыток ВСЕГДА, отдых 15 мин после каждых 10, излишки → пул</div>
+<div class="mut" style="margin-top:4px">фармеры = ВСЕ онлайн-устройства кроме сборщиков (подойдёт любой device_id — и phone_xxx от bootstrap; рекомендуемые имена 0–29) · сборщики: collector-1/2/3 · сбор = 2 пачки по N мин (фармеры пополам) · рега = 2×10 попыток ВСЕГДА, отдых 15 мин после каждых 10, излишки → пул · если устройств не было онлайн в назначенное время — попытка повторится ещё 2 часа</div>
 </div>
 
 <div class="panel">
@@ -348,7 +348,9 @@ async function apkAll(){
 // ---------- ⏰ расписание (рега + сбор) ----------
 async function loadSched(){
   try{
-    const j=await(await fetch('/api/schedule')).json();
+    const r=await fetch('/api/schedule');
+    if(!r.ok){$('schedState').textContent='· сервер: ошибка '+r.status;return}
+    const j=await r.json();
     const s=j.schedule||{};
     $('regaTime').value=s.rega_time||'03:00';
     $('harvestTime').value=s.harvest_time||'20:00';
@@ -356,12 +358,13 @@ async function loadSched(){
     $('checkMin').value=s.cookie_check_interval_min||30;
     $('hwPlace').value=s.harvest_place_id||'';
     const st=j.state||{};
+    const on=j.farmers_online||[],tot=j.farmers_total||[];
     $('schedState').textContent='· последняя рега: '+(st.last_rega||'—')
       +' · последний сбор: '+(st.last_harvest||'—')
       +(st.rega_pending&&st.rega_pending.length?' · 🆕 рега идёт: '+st.rega_pending.join(','):'')
-      +' · фармеры онлайн: '+(j.farmers_online||[]).length+'/'+((j.farmers_online||[]).length+0)
-      +' · сборщики: '+(j.collectors_online||[]).length;
-  }catch(e){}
+      +' · фармеры онлайн: '+on.length+'/'+tot.length+(on.length?' ('+on.join(',')+')':'')
+      +' · сборщики: '+(j.collectors_online||[]).length+'/'+(j.collectors_total||[]).length;
+  }catch(e){$('schedState').textContent='· сервер недоступен'}
 }
 async function saveSched(){
   const body={enabled:true,
@@ -370,6 +373,9 @@ async function saveSched(){
     batch_minutes:parseInt($('batchMin').value)||20,
     cookie_check_interval_min:parseInt($('checkMin').value)||30,
     harvest_place_id:$('hwPlace').value.trim()};
+  const tt=/^([0-1][0-9]|2[0-3]):[0-5][0-9]$/;
+  if(!tt.test(body.rega_time)||!tt.test(body.harvest_time)){
+    show('❌ время должно быть ЧЧ:ММ, например 03:00 (часы 00–23, минуты 00–59)');return}
   const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)});
   show(r.ok?'⏰ расписание сохранено:\n'+JSON.stringify(await r.json(),null,2):'❌ '+await r.text());
@@ -378,12 +384,23 @@ async function saveSched(){
 async function regaNow(){
   if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → рега (20 попыток, отдых 15 мин после каждых 10) → фарм сам вернётся'))return;
   const r=await fetch('/api/rega/start',{method:'POST'});
-  show('🆕 '+JSON.stringify(await r.json(),null,2));
+  const j=await r.json();
+  if(!j.ok){
+    show('❌ РЕГА НЕ ЗАПУЩЕНА: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
+      +'\nвсего фармеров известно: '+((j.farmers_total||[]).length)
+      +'\n\nподключи телефоны (или подожди) — статус в шапке блока обновляется сам');return}
+  show('🆕 РЕГА ЗАПУСКАЕТСЯ на: '+(j.farmers||[]).join(', ')+'\n\n'+j.note
+      +'\n\nстатус: «рега идёт» в шапке блока + события rega.* в 📅');
 }
 async function harvestNow(){
   if(!confirm('Запустить СБОР УРОЖАЯ сейчас?\n2 пачки по '+$('batchMin').value+' мин (фармеры пополам) + сборщики'))return;
   const r=await fetch('/api/harvest/start',{method:'POST'});
-  show('🌾 '+JSON.stringify(await r.json(),null,2));
+  const j=await r.json();
+  if(!j.ok){
+    show('❌ СБОР НЕ ЗАПУЩЕН: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
+      +'\nсборщики онлайн: '+((j.collectors||[]).join(', ')||'—')
+      +'\n\nподключи телефоны (или подожди) — статус в шапке блока обновляется сам');return}
+  show('🌾 СБОР ЗАПУСКАЕТСЯ\nфармеры: '+(j.farmers||[]).join(', ')+'\nсборщики: '+(j.collectors||[]).join(', ')+'\n\n'+j.note);
 }
 async function cookieCheckAll(){
   const r=await fetch('/api/cookie/check',{method:'POST'});
