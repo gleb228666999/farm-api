@@ -20,7 +20,7 @@ button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}butto
 .ev-rega\.fail,.ev-check\.fail,.ev-farm\.no_cookies{color:#f66}
 .ev-farm\.rega_done{color:#6f6}.ev-farm\.rega_empty,.ev-farm\.rega_started{color:#fa0}
 .ev-pool\.claim,.ev-pool\.push{color:#ff9}
-.ev-check\.replace{color:#8cf}.ev-rega\.start{color:#fc6}
+.ev-check\.replace{color:#8cf}.ev-rega\.start{color:#fc6}.ev-rega\.stray{color:#fa0}
 .panel{margin-top:10px;padding:8px 10px;border:1px solid #333;border-radius:6px;background:#181818}
 select{background:#222;color:#ddd;padding:4px 8px;border:1px solid #444;border-radius:4px}
 textarea{background:#111;color:#9f9;border:1px solid #444;border-radius:4px;width:100%;
@@ -188,7 +188,7 @@ async function bypassSel(d){
 }
 function rega(d){
   if(!d){show('❌ сначала кликни по устройству');return}
-  if(!confirm('🆕 Рег акков на '+d+'? (20 попыток, отдых 15 мин после каждых 10)'))return;
+  if(!confirm('🆕 Рег акков на '+d+'? (20 попыток, отдых 15 мин после каждых 10; случайно запущенные клоны во время реги закрываются автоматически)'))return;
   selected=d;run({type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
 }
 function harvestOn(d){
@@ -382,7 +382,7 @@ async function saveSched(){
   loadSched();
 }
 async function regaNow(){
-  if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → рега (20 попыток, отдых 15 мин после каждых 10) → фарм сам вернётся'))return;
+  if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → рега (20 попыток, отдых 15 мин после каждых 10) → фарм сам вернётся\nслучайно запущенные клоны во время реги закрываются автоматически'))return;
   const r=await fetch('/api/rega/start',{method:'POST'});
   const j=await r.json();
   if(!j.ok){

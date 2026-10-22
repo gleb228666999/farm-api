@@ -30,6 +30,10 @@ v18.8 (принципы хозяина):
 - кука №1 → com.roblox.client (Delta) — байпасу нужна залогиненная Дельта
 - инъекция .ROBLOSECURITY в WebView SQLite + prefs.xml (nick/userid)
 - регистрация по UI-координатам (портрет)
+- 🔍 Сторож случайных клонов: если во время РЕГИСТРАЦИИ случайно запустился
+  клон Roblox (тап по рабочему столу) — закрывается сразу, попытка продолжается
+  или повторяется следующим заходом. Инъекцию кук в клоны сторож НЕ трогает
+  (там клоны запускаются намеренно)
 """
 import os
 import sys
@@ -106,12 +110,17 @@ def stop_requested() -> bool:
     return _STOP[0]
 
 
-def interruptible_sleep(total_sec, step=5) -> bool:
-    """True = стоп запрошен во время сна."""
+def interruptible_sleep(total_sec, step=5, watch_clones=False) -> bool:
+    """True = стоп запрошен во время сна.
+    watch_clones=True → во время сна ловим случайно запущенные клоны."""
     end = time.time() + total_sec
+    next_watch = 0.0
     while time.time() < end:
         if stop_requested():
             return True
+        if watch_clones and time.time() >= next_watch:
+            close_stray_clones("пауза регы")
+            next_watch = time.time() + 30
         time.sleep(min(step, max(0.2, end - time.time())))
     return stop_requested()
 
@@ -299,10 +308,57 @@ def kill_all_roblox():
 
 
 def launch():
-    """🚀 Запуск MAIN для регистрации"""
+    """🚀 Запуск MAIN для регистрации (во время 20с ожидания ловим случайные клоны)"""
     log(f"🚀 Запуск {PACKAGE_MAIN} для реги, жду 20с")
     run_su(f"monkey -p {PACKAGE_MAIN} -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1", timeout=10)
-    time.sleep(20)
+    for _ in range(5):                       # 20с по 4с: пока Дельта поднимается —
+        if stop_requested():                 # случайно запущенный клон уходит
+            return
+        close_stray_clones("пока Дельта запускается")
+        time.sleep(4)
+
+
+# ==========================================
+# 🔍 СТОРОЖ СЛУЧАЙНЫХ КЛОНОВ (не трогает инъекцию!)
+# ==========================================
+# Во время РЕГИСТРАЦИИ на экране должна быть ТОЛЬКО Дельта (main): координаты
+# реги портретные и рассчитаны на её экран. Случайно запущенный клон (тап по
+# рабочему столу) перехватывает фокус и тапы → попытка пропадает. Сторож
+# закрывает ВСЕ com.roblox* кроме main (+ Chrome/браузер) на ВСЕХ этапах
+# регистрации: попытка продолжает жить (main сам вернётся на передний план)
+# или повторяется следующим заходом.
+# ВНИМАНИЕ: после регистрации рега НАМЕРЕННО запускает клоны (инъекция кук,
+# do_injection) и в check-режиме тоже — туда сторож НЕ вызывается.
+
+STRAY_EXTRA_PKGS = ("com.android.chrome", "com.android.browser")
+
+
+def _pkg_running(pkg) -> bool:
+    ok, out, err = run_su(f"pidof {pkg}", timeout=5)
+    if ok:
+        return bool(re.search(r"\d", out or ""))
+    if "not found" in (err or "").lower() or "no such" in (err or "").lower():
+        # pidof отсутствует в системе → fallback ps
+        ok2, out2, _2 = run_su(f"ps -A | grep -w '{pkg}' | grep -v grep", timeout=8)
+        return ok2 and pkg in (out2 or "")
+    return False                              # pidof отработал — процесса нет
+
+
+def close_stray_clones(reason="") -> list:
+    """Закрыть случайно запущенные клоны (+Chrome). Возвращает список убитых.
+    Вызывается ТОЛЬКО в фазе регистрации — инъекцию кук в клоны не трогает."""
+    killed = []
+    for pkg in [p for p in roblox_pkgs() if p != PACKAGE_MAIN] + list(STRAY_EXTRA_PKGS):
+        try:
+            if _pkg_running(pkg) and run_su(f"am force-stop {pkg}", timeout=5)[0]:
+                killed.append(pkg)
+        except Exception:
+            pass
+    if killed:
+        why = f" | {reason}" if reason else ""
+        log(f"🧹 Случайно запущенное закрыто: {', '.join(killed)}{why} — продолжаем/пробуем заново")
+        emit("rega.stray", killed=killed, reason=reason)
+    return killed
 
 
 # ==========================================
@@ -387,11 +443,15 @@ def _read_roblosecurity(db):
     return None
 
 
-def extract_cookie(pkg=PACKAGE_MAIN, wait=30):
+def extract_cookie(pkg=PACKAGE_MAIN, wait=30, watch_clones=False):
     deadline = time.time() + wait
+    i = 0
     while time.time() < deadline:
         if stop_requested():
             return None
+        if watch_clones and i % 3 == 0:       # ~раз в 9с — клон мог перехватить экран
+            close_stray_clones("ждём куку")
+        i += 1
         for db in cookie_db_candidates(pkg):
             v = _read_roblosecurity(db)
             if v:
@@ -1135,9 +1195,13 @@ def wait_registration_screen(extra=15):
     deadline = time.time() + extra
     marks = ("sign up", "sign-up", "signup", "log in", "login", "sign in",
              "войти", "регистрац", "создать", "birthday", "дата рожден")
+    i = 0
     while time.time() < deadline:
         if stop_requested():
             return False
+        if i % 3 == 0:                        # ~раз в 6с: клон мог перехватить экран
+            close_stray_clones("ждём экран регистрации")
+        i += 1
         xml = ui_dump()
         if xml:
             if "EditText" in xml:
@@ -1181,10 +1245,14 @@ def password_field_visible():
 def wait_password_field(timeout=P_FIELD_WAIT):
     deadline = time.time() + timeout
     poked = False
+    i = 0
     while time.time() < deadline:
         if password_field_visible():
             log("✅ Поле пароля открыто")
             return True
+        if i % 6 == 0:                        # ~раз в 6с: клон мог перехватить экран
+            close_stray_clones("ждём поле пароля")
+        i += 1
         if not poked and (deadline - time.time()) <= 6:
             tap(*TAP_X)
             poked = True
@@ -1233,6 +1301,7 @@ def hide_keyboard():
 
 
 def registration_attempt(attempt_num):
+    close_stray_clones(f"перед попыткой {attempt_num}")   # чистый экран перед UI-автоматизацией
     nick = gen_nick()
     password = gen_pass(nick)
     log(f"— ПОПЫТКА {attempt_num} | ник: {nick}")
@@ -1282,7 +1351,7 @@ def registration_attempt(attempt_num):
         log("🚫 RATE-LIMIT после Готово!")
         return None, True
 
-    cookie = extract_cookie(wait=P_COOKIE_WAIT)
+    cookie = extract_cookie(wait=P_COOKIE_WAIT, watch_clones=True)
     if not cookie:
         log("❌ Кука не появилась")
         if has_session(PACKAGE_MAIN):
@@ -1333,6 +1402,9 @@ def collect_cookies(target_total):
             consec_errors = 0
         finally:
             kill_main_only()
+            strays = close_stray_clones(f"после попытки {done}")
+            if strays and not result:
+                log("⚠️ Клон мешал попытке — закрыт; следующий заход = повтор попытки")
             if not _hard_reset_main(f"после попытки {done}"):
                 log("⚠️ Ресет после попытки не подтвердился")
         emit("rega.attempt", n=done, ok=bool(result), nick=(result or {}).get("nick", ""))
@@ -1347,7 +1419,7 @@ def collect_cookies(target_total):
         if rl or (done % REG_ATTEMPTS == 0 and done < REG_TOTAL):
             why = "RATE-LIMIT" if rl else f"сделано {done}/{REG_TOTAL}"
             log(f"⏸️ Отдых 15 мин... ({why})")
-            if interruptible_sleep(ROUND_PAUSE, step=10):
+            if interruptible_sleep(ROUND_PAUSE, step=10, watch_clones=True):
                 log("🛑 Стоп: пауза регы прервана")
                 break
     log(f"🏁 Рега завершена: попыток {done}/{REG_TOTAL} | аккаунтов {len(kept)}")
@@ -1438,6 +1510,7 @@ def phase_registration_and_login(target):
     log("=" * 50)
     set_portrait()
     wake_screen()
+    close_stray_clones("старт реги")          # случайные клоны с рабочего стола — вон
     archive_and_clear_cookies("перед стартом новой сессии")
     soft_logout_all()
     if stop_requested():
