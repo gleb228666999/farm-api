@@ -125,6 +125,19 @@ v0.21 (🛠 ФИКС ЗАХОДА В ПРИВАТКИ — алгоритм из 
 - ✅ Единый хелпер am_start_link() + private_deep_link(): один и тот же
     алгоритм в launch_farmers_private, restart_pkg (вылетевший клон
     возвращается НА СВОЮ приватку) и в сервисе collector.
+
+v0.22 (🔥 ЛОКАЛЬНЫЕ КОДЫ ПРИВАТОК — фолбэк как в РАБОЧЕМ скрипте хозяина):
+- ✅ ГЛАВНАЯ ПРИЧИНА «во время сбора запускает в просто плейс»: если телефон
+    не смог скачать id.txt с GitHub raw (сеть/блокировка) и кэш пуст, кодов
+    привяток НЕ было вообще → срабатывала ветка launch_roblox_light_farm() —
+    фермеров запускало В ОБЫЧНЫЙ ПЛЕЙС. В рабочем скрипте хозяина (collet(1).py)
+    такого НЕ бывает: там 4 кода привяток ЗАШИТЫ В САМ СКРИПТ
+    (PRIVATE_SHARE_CODES) как локальный фолбэк, поэтому он работает всегда.
+- ✅ Теперь ТОЧНО ТАК ЖЕ: PRIVATE_SHARE_CODES_FALLBACK — зашитые share-коды
+    привяток из id.txt хозяина. Порядок получения кодов: GitHub id.txt →
+    кэш info/harvest_ids.txt → ЗАШИТЫЕ КОДЫ (привятки есть ВСЕГДА, ветки
+    «запуск в обычный плейс» во время сбора больше НЕТ).
+- ✅ То же в сервисе collector (get_codes) — сборщик тоже не падает в плейс.
 """
 import os
 import sys
@@ -220,6 +233,16 @@ HARVEST_TREID_URL = "https://raw.githubusercontent.com/gleb228666999/test/refs/h
 HARVEST_IDS_URL = "https://raw.githubusercontent.com/gleb228666999/test/refs/heads/main/id.txt"
 TREID_CACHE_FILE = FARM_BASE / "info" / "harvest_treid.lua"   # кэш на случай, если GitHub недоступен
 IDS_CACHE_FILE = FARM_BASE / "info" / "harvest_ids.txt"       # (общий кэш с сервисом collector)
+# 🔥 v0.22: ЗАШИТЫЕ КОДЫ ПРИВАТОК — локальный фолбэк, КАК В РАБОЧЕМ СКРИПТЕ
+# хозяина (collet(1).py, PRIVATE_SHARE_CODES): если id.txt недоступен с телефона
+# (сеть/GitHub) и кэша нет — фермеры ВСЁ РАВНО заходят в приватки по этим кодам,
+# а НЕ уходят в обычный плейс. Список синхронизирован с id.txt хозяина.
+PRIVATE_SHARE_CODES_FALLBACK = [
+    "56c0dba8b10a4d44a9cd5c9b2b41265f",
+    "c9201bc54ffbc343a7175a1385c0f4ce",
+    "f7e4f4a2b71ded49a4aab247eec9c62f",
+    "2ce541838492ac41b0bd0be49a8d995c",
+]
 HARVEST_RELAUNCH_GRACE = 90   # сек после запуска в приватку, прежде чем считать клон вылетевшим
                               # (share-ссылка идёт через браузер — редирект занимает время)
 # 🛡 v0.20 kill-switch регы акков: пишет КЛИЕНТ (rega.switch с сервера)
@@ -963,7 +986,11 @@ def run_harvest_session(hw):
     if codes:
         log(f"🔗 Приватные сервера из id.txt: {len(codes)} шт.")
     else:
-        log("⚠️ id.txt недоступен — фолбэк: обычный запуск в плейс (трейд будет ждать цели)")
+        # 🔥 v0.22: КАК В РАБОЧЕМ СКРИПТЕ хозяина — зашитые коды привяток.
+        # Раньше фолбэком был ОБЫЧНЫЙ ПЛЕЙС — фермеры уходили в публичку и
+        # сбор не работал. Теперь привятки есть ВСЕГДА.
+        codes = list(PRIVATE_SHARE_CODES_FALLBACK)
+        log(f"⚠️ id.txt недоступен — зашитый фолбэк привяток (как в рабочем скрипте): {len(codes)} шт.")
 
     # 🍪 без кук на клонах в приватки не зайти — не стартуем (куки НЕ трогаем!)
     farm_pkgs_all = get_farm_packages()
@@ -1933,7 +1960,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + сбор-трейд + kill-switch регы v0.20 + фикс приваток v0.21, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + сбор-трейд v0.20 + приватки v0.22: зашитый фолбэк, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")

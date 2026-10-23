@@ -13,8 +13,11 @@
     stdout → logs/services/collector.log; phone device_id = collector-1/2/...
 - ✅ Автоэкзекют Дельты = collet.lua (авто-приём трейдов + anti-AFK):
     качается с GitHub, кэш info/collector_collet.lua, фолбэк — зашитая loadstring.
-- ✅ Приватные сервера — ТОЛЬКО из id.txt хозяина (32-симв. share-коды,
+- ✅ Приватные сервера — из id.txt хозяина (32-симв. share-коды,
     кэш info/harvest_ids.txt — общий с фармом); клоны расходятся по кругу.
+    🔥 v1.1: как в рабочем скрипте хозяина — есть ЗАШИТЫЙ фолбэк кодов
+    (farm.PRIVATE_SHARE_CODES_FALLBACK): id.txt недоступен → привятки
+    всё равно есть, в обычный плейс не падаем.
 - ✅ Окно сбора пишет КЛИЕНТ (harvest.start/harvest.stop →
     info/harvest_window.json) — ТОТ ЖЕ файл, что читает фарм на фармерах:
     серверу не важно, кто на другом конце, протокол не менялся.
@@ -100,8 +103,13 @@ def harvest_window():
 
 
 def get_codes():
-    """Share-коды приваток из id.txt (сеть → кэш)."""
-    return farm.parse_share_codes(farm.fetch_text(IDS_URL, IDS_CACHE) or "")
+    """Share-коды приваток: id.txt (сеть) → кэш → ЗАШИТЫЙ фолбэк (v1.1,
+    как в рабочем скрипте хозяина collet(1).py): привятки есть ВСЕГДА."""
+    codes = farm.parse_share_codes(farm.fetch_text(IDS_URL, IDS_CACHE) or "")
+    if not codes:
+        codes = list(farm.PRIVATE_SHARE_CODES_FALLBACK)
+        log(f"⚠️ id.txt недоступен — зашитый фолбэк привяток (как в рабочем скрипте): {len(codes)} шт.")
+    return codes
 
 
 def last_key_age():
@@ -258,7 +266,7 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
 
-    log("📦 COLLECTOR SERVICE START v1.0 (сборщик: авто-приём трейдов, банк)")
+    log("📦 COLLECTOR SERVICE START v1.1 (сборщик: авто-приём трейдов, банк, зашитый фолбэк привяток)")
     log(f"   su: {farm.SU_BIN}")
     log(f"   base: {BASE}")
     log(f"   ZEN-API: {'✅' if farm.ZEN_API_KEY else '❌'} | "
