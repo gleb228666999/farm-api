@@ -118,8 +118,10 @@ def last_key_age():
 # ==========================================
 
 def launch_targets(codes):
-    """Клоны сборщика — по привяткам ПО КРУГУ (как в bank.py:
-    share-ссылка в браузере → редирект в Roblox; фолбэк — deep link в плейс).
+    """Клоны сборщика — по привяткам ПО КРУГУ — АЛГОРИТМ ИЗ РАБОЧЕГО скрипта
+    хозяина (collet(1).py): share-ссылка → если не сработала, фолбэк — ПРЯМОЙ
+    deep link В ПРИВАТКУ (placeId + privateServerLinkCode), а НЕ в обычный
+    плейс (см. farm.am_start_link).
     Клонов нет → запускаем главный Roblox (Дельту) — у сборщика может не быть
     клонов, а приёмщик-акк может жить на главном пакете."""
     pkgs = farm.get_farm_packages()
@@ -133,14 +135,7 @@ def launch_targets(codes):
             share = f"https://www.roblox.com/share?code={code}&type=Server"
             launch_map[pkg] = share
             log(f"🔗 [{i + 1}] {pkg} → приватка {code[:8]}…")
-            ok, _, _ = farm.run_su(
-                f"am start -a android.intent.action.VIEW -d '{share}' {pkg}", timeout=10)
-            if not ok:
-                log(f"   ⚠️ share-ссылка не сработала — фолбэк: deep link в плейс {farm.PLACE_ID}")
-                farm.run_su(f"am start -a android.intent.action.VIEW "
-                            f"-d 'roblox://experiences/start?placeId={farm.PLACE_ID}' {pkg}",
-                            timeout=5)
-                launch_map[pkg] = ""      # перезапуск — в плейс
+            farm.am_start_link(share, pkg)
         else:
             launch_map[pkg] = ""
             farm.run_su(f"am start -a android.intent.action.VIEW "
@@ -212,12 +207,7 @@ def run_window(hw):
             time.sleep(15)
             link = launch_map.get(pkg)
             if link:
-                ok, _, _ = farm.run_su(
-                    f"am start -a android.intent.action.VIEW -d '{link}' {pkg}", timeout=10)
-                if not ok:
-                    farm.run_su(f"am start -a android.intent.action.VIEW "
-                                f"-d 'roblox://experiences/start?placeId={farm.PLACE_ID}' {pkg}",
-                                timeout=5)
+                farm.am_start_link(link, pkg)
             else:
                 farm.run_su(f"am start -a android.intent.action.VIEW "
                             f"-d 'roblox://experiences/start?placeId={farm.PLACE_ID}' {pkg}",

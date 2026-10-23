@@ -110,6 +110,21 @@ v0.20 (🛡 БЕЗОПАСНЫЙ СБОР-ТРЕЙД + kill-switch регы):
 - ✅ Новый сервис-компаньон services/collector/main.py — телефон-сборщик
     (порт bank.py хозяина): автоэкзекют = collet.lua (авто-приём трейдов),
     полный байпас v18.8 (импорт этого модуля), те же приватки из id.txt.
+
+v0.21 (🛠 ФИКС ЗАХОДА В ПРИВАТКИ — алгоритм из РАБОЧЕГО скрипта хозяина):
+- ✅ СБОР НЕ РАБОТАЛ: фермеры не заходили на приватные сервера. Причина —
+    фолбэк после несработавшей share-ссылки вёл В ОБЫЧНЫЙ ПЛЕЙС
+    (roblox://experiences/start?placeId=...) БЕЗ кода привата: у клонов
+    am start с https-ссылкой часто не отрабатывает → фермеры уходили в
+    публичный плейс, трейд не начинался.
+- ✅ Теперь КАК В РАБОЧЕМ СКРИПТЕ (collet(1).py):
+    1) share-ссылка https://www.roblox.com/share?code=...&type=Server;
+    2) не сработала → ПРЯМОЙ deep link В ПРИВАТКУ
+       roblox://experiences/start?placeId=...&privateServerLinkCode=...
+       (без браузера, сразу в приватный сервер).
+- ✅ Единый хелпер am_start_link() + private_deep_link(): один и тот же
+    алгоритм в launch_farmers_private, restart_pkg (вылетевший клон
+    возвращается НА СВОЮ приватку) и в сервисе collector.
 """
 import os
 import sys
@@ -691,11 +706,42 @@ def parse_share_codes(text):
     return out
 
 
+def private_deep_link(code, place=None):
+    """🔥 v0.21: ПРЯМОЙ deep link В ПРИВАТКУ (как в рабочем скрипте хозяина
+    collet(1).py): placeId + privateServerLinkCode — Roblox заходит на
+    приватный сервер НАПРЯМУЮ, без браузерного редиректа."""
+    return f"roblox://experiences/start?placeId={place or PLACE_ID}&privateServerLinkCode={code}"
+
+
+def am_start_link(link, pkg, place=None):
+    """🚀 v0.21: запуск pkg по ссылке — ЕДИНЫЙ АЛГОРИТМ ЗАХОДА, КАК В РАБОЧЕМ
+    СКРИПТЕ ХОЗЯИНА (collet(1).py):
+      1) share-ссылка 'https://www.roblox.com/share?code=...&type=Server'
+         (браузер → редирект в Roblox);
+      2) am start не сработал → ПРЯМОЙ deep link В ПРИВАТКУ
+         (placeId + privateServerLinkCode из share-кода) — раньше фолбэк вёл
+         в обычный плейс БЕЗ кода привата, и фермеры не заходили в приватки.
+    Возвращает True, если сработал первый метод (share)."""
+    ok, _, _ = run_su(f"am start -a android.intent.action.VIEW -d '{link}' {pkg}", timeout=5)
+    if ok:
+        return True
+    m = re.search(r'code=([0-9a-fA-F]{32})', link or "")
+    if m:
+        code = m.group(1)
+        log(f"   ⚠️ Метод 1 (Share) не сработал для {pkg} — фолбэк: deep link в приватку {code[:8]}…")
+        run_su(f"am start -a android.intent.action.VIEW -d '{private_deep_link(code, place)}' {pkg}", timeout=5)
+    else:
+        log(f"   ⚠️ am start не сработал для {pkg} — фолбэк: deep link в плейс {place or PLACE_ID}")
+        run_su(f"am start -a android.intent.action.VIEW -d 'roblox://experiences/start?placeId={place or PLACE_ID}' {pkg}", timeout=5)
+    return False
+
+
 def launch_farmers_private(codes):
-    """🚜 v0.20: запуск клонов НА ПРИВАТНЫЕ СЕРВЕРА (как в скрипте сборщика
-    bank.py): браузерная share-ссылка → редирект в Roblox; фолбэк — прямой
-    deep link в плейс. Коды расходятся по клонам ПО КРУГУ.
-    Возвращает (пакеты, {pkg: share-ссылка для перезапуска}; "" = перезапуск в плейс)."""
+    """🚜 v0.21: запуск клонов НА ПРИВАТНЫЕ СЕРВЕРА — алгоритм ИЗ РАБОЧЕГО
+    скрипта хозяина (collet(1).py): share-ссылка → если не сработала, фолбэк —
+    прямой deep link В ПРИВАТКУ (placeId + privateServerLinkCode), а НЕ в
+    обычный плейс. Коды расходятся по клонам ПО КРУГУ.
+    Возвращает (пакеты, {pkg: share-ссылка для перезапуска})."""
     farm_pkgs = get_farm_packages()
     launch_map = {}
     if not farm_pkgs:
@@ -707,11 +753,7 @@ def launch_farmers_private(codes):
         share = f"https://www.roblox.com/share?code={code}&type=Server"
         launch_map[pkg] = share
         log(f"🔗 [{i + 1}] {pkg} → приватка {code[:8]}…")
-        ok1, _, _ = run_su(f"am start -a android.intent.action.VIEW -d '{share}' {pkg}", timeout=10)
-        if not ok1:
-            log(f"   ⚠️ share-ссылка не сработала — фолбэк: deep link в плейс {PLACE_ID}")
-            run_su(f"am start -a android.intent.action.VIEW -d 'roblox://experiences/start?placeId={PLACE_ID}' {pkg}", timeout=5)
-            launch_map[pkg] = ""          # перезапускать будем в плейс
+        am_start_link(share, pkg)
         launched += 1
         time.sleep(2)
     log(f"   ✅ Фермеров запущено в приватки: {launched}")
@@ -802,8 +844,10 @@ def is_pkg_visible(pkg, win_out, act_out):
 
 def restart_pkg(pkg, place=None, link=None):
     """🔄 Принудительно останавливает пакет, ждет 15 сек и запускает его снова.
-    🆕 v0.20: link — share-ссылка приватки (сбор): клон возвращается НА СВОЙ
-    приватный сервер; link="" или None — как раньше, deep link в плейс."""
+    🆕 v0.21: link — share-ссылка приватки (сбор): клон возвращается НА СВОЙ
+    приватный сервер; если share не сработала — фолбэк КАК В СКРИПТЕ ХОЗЯИНА:
+    прямой deep link в приватку (placeId + privateServerLinkCode из share-кода).
+    link="" или None — как раньше, deep link в плейс."""
     place = place or PLACE_ID
     emit("farm.restart", pkg=pkg, private=bool(link))
     log(f"⚠️ Окно {pkg} не видно → останавливаю пакет...")
@@ -814,10 +858,7 @@ def restart_pkg(pkg, place=None, link=None):
 
     if link:
         log(f"🚀 Повторный запуск {pkg} НА ПРИВАТНЫЙ СЕРВЕР...")
-        ok, _, _ = run_su(f"am start -a android.intent.action.VIEW -d '{link}' {pkg}", timeout=10)
-        if not ok:
-            log(f"   ⚠️ share-ссылка не сработала — фолбэк: deep link в плейс {place}")
-            run_su(f"am start -a android.intent.action.VIEW -d 'roblox://experiences/start?placeId={place}' {pkg}", timeout=5)
+        am_start_link(link, pkg, place)
         return
     deep_link = f"'roblox://experiences/start?placeId={place}'"
     log(f"🚀 Повторный запуск {pkg} в плейс {place}...")
@@ -1892,7 +1933,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + безопасный сбор-трейд + kill-switch регы v0.20, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + сбор-трейд + kill-switch регы v0.20 + фикс приваток v0.21, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
