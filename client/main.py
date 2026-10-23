@@ -77,6 +77,23 @@
         15 мин; попытка продолжается (main сам вернётся вперёд) или
         повторяется следующим заходом. Инъекция кук в клоны и check-режим
         сторожем НЕ трогаются — там клоны запускаются намеренно
+- v0.20: 🛡 БЕЗОПАСНЫЙ РЕЖИМ + СБОР-ТРЕЙД (отдельный телефон-сборщик):
+        • задача rega.switch {enabled} — kill-switch регы АККОВ: клиент
+          пишет info/rega_switch.json (файла нет = ВЫКЛЮЧЕНА — безопасный
+          режим по умолчанию, чтобы случайно не потерять акки с лутом);
+          сервер присылает переключение при hello и по тумблеру дашборда;
+        • rega.start при выключенной реге отказывает (ok:false) —
+          авторегистрация и замена кук на этом телефоне не идут;
+        • cookie.check отказывает во время активного окна сбора (не мешаем
+          трейду — check перезапускает клоны);
+        • bypass.run: если на телефоне жив СБОРЩИК (сервис collector) — фарм
+          не стартуем, байпас выполнит сборщик (тот же флаг bypass_force);
+        • (в сервисах) фарм: СБОР v2 — автоэкзекют на время окна = treid.lua
+          (масс-трейд лута целям-сборщикам), приватки ТОЛЬКО из id.txt хозяина
+          (кэш), вылетевший клон возвращается НА СВОЙ приватный сервер, после
+          окна фарм-скрипт восстанавливается; новый сервис collector (порт из
+          bank.py хозяина): автоэкзекют = collet.lua (авто-приём трейдов),
+          полный байпас v18.8, те же приватки из id.txt
 """
 import sys
 import os
@@ -104,7 +121,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.19"
+VERSION = "0.20"
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -167,6 +184,42 @@ def get_farm_state() -> dict | None:
         return json.loads((BASE / "info" / "farm_state.json").read_text())
     except Exception:
         return None
+
+
+# ---------- 🛡 kill-switch регы акков (v0.20, безопасный режим) ----------
+
+REGA_SWITCH_FILE = BASE / "info" / "rega_switch.json"
+
+
+def rega_switch_enabled() -> bool:
+    """Включена ли рега акков НА ЭТОМ телефоне. Файл пишет клиент (задача
+    rega.switch с сервера — тумблер дашборда и hello-sync). Файла нет =
+    ВЫКЛЮЧЕНА: безопасный режим по умолчанию — акки с лутом защищены."""
+    try:
+        return bool(json.loads(REGA_SWITCH_FILE.read_text()).get("enabled"))
+    except Exception:
+        return False
+
+
+def task_rega_switch(payload: dict) -> dict:
+    """🛡 Сервер включил/выключил регу акков (тумблер дашборда / hello-sync)."""
+    enabled = bool(payload.get("enabled"))
+    data = {"enabled": enabled, "ts": round(time.time(), 1),
+            "source": str(payload.get("source") or "server")}
+    tmp = REGA_SWITCH_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(REGA_SWITCH_FILE)                       # атомарно
+    log(f"🛡 Рега акков {'ВКЛЮЧЕНА' if enabled else 'ОТКЛЮЧЕНА (безопасный режим, акки защищены)'}")
+    return {"ok": True, "rega_enabled": enabled}
+
+
+def harvest_window_active() -> bool:
+    """🌾 Активно ли сейчас окно сбора (info/harvest_window.json не истекло)."""
+    try:
+        hw = json.loads((BASE / "info" / "harvest_window.json").read_text())
+        return time.time() < float(hw.get("until_ts") or 0)
+    except Exception:
+        return False
 
 
 # ==========================
@@ -323,7 +376,13 @@ def task_harvest_stop(payload: dict) -> dict:
 
 
 def task_rega_start(payload: dict) -> dict:
-    """Полная авторегистрация (сервис rega, сам поднимет фарм по завершении)."""
+    """Полная авторегистрация (сервис rega, сам поднимет фарм по завершении).
+    🛡 v0.20: при выключенном kill-switch — отказ (акки с лутом защищены)."""
+    if not rega_switch_enabled():
+        log("🛡 rega.start ОТКЛОНЁН: рега акков выключена (безопасный режим)")
+        return {"ok": False,
+                "note": "🛡 рега акков ОТКЛЮЧЕНА на этом телефоне (rega.switch) — "
+                        "акки с лутом защищены; включи тумблером на дашборде"}
     r = PM.start("rega")
     if r.get("ok"):
         return {"ok": True, "note": "рега запущена (farm ⏹ уже сделан сервером)", **r}
@@ -333,7 +392,9 @@ def task_rega_start(payload: dict) -> dict:
 def task_bypass_run(payload: dict) -> dict:
     """🔓 БАЙПАС КАК В v18.8: ставим флаг — фарм в ≤30с делает ПОЛНЫЙ цикл
     (Delta → реклама → ZEN-API → ключ → license) БЕЗ рестарта сервиса.
-    Фарм не жил → запускаем: он стартует и сразу увидит флаг."""
+    Фарм не жил → запускаем: он стартует и сразу увидит флаг.
+    🛡 v0.20: если на телефоне жив СБОРЩИК (collector) — фарм НЕ стартуем,
+    байпас выполнит сборщик (тот же флаг info/bypass_force.json)."""
     data = {"ts": round(time.time(), 1),
             "source": str(payload.get("source") or "dashboard")}
     f = BASE / "info" / "bypass_force.json"
@@ -341,21 +402,33 @@ def task_bypass_run(payload: dict) -> dict:
     tmp.write_text(json.dumps(data))
     tmp.replace(f)                                   # атомарно
     was_running = PM.is_running("farm")
+    collector_running = PM.is_running("collector")
     started = False
-    if not was_running:
+    if not was_running and not collector_running:
         r = PM.start("farm")
         started = bool(r.get("ok"))
     log(f"🔓 Флаг байпаса v18.8 поставлен (фарм "
-        f"{'уже жил' if was_running else ('запущен' if started else 'НЕ запущен!')})")
+        f"{'уже жил' if was_running else ('запущен' if started else 'НЕ запущен!')}"
+        f"{'; СБОРЩИК жив — байпас выполнит он' if collector_running else ''})")
     return {"ok": True, "farm_was_running": was_running, "farm_started": started,
+            "collector_running": collector_running,
             **data,
-            "note": "фарм выполнит полный байпас v18.8 ≤30с; "
-                    "события bypass.ok/bypass.fail → 📅; вылетевшие клоны "
-                    "перезапускаются в плейс мониторингом каждые 30с"}
+            "note": ("сборщик жив — полный байпас v18.8 выполнит СЕРВИС COLLECTOR ≤30с"
+                     if collector_running else
+                     "фарм выполнит полный байпас v18.8 ≤30с; "
+                     "события bypass.ok/bypass.fail → 📅; вылетевшие клоны "
+                     "перезапускаются в плейс мониторингом каждые 30с")}
 
 
 def task_cookie_check(payload: dict) -> dict:
-    """Быстрая проверка кук (rega check) — в фоне, результат придёт событиями."""
+    """Быстрая проверка кук (rega check) — в фоне, результат придёт событиями.
+    🛡 v0.20: во время активного окна сбора — отказ: check перезапускает клоны
+    и срывает трейд."""
+    if harvest_window_active():
+        log("🛡 cookie.check отложен: идёт окно сбора (не мешаем трейду)")
+        return {"ok": False,
+                "note": "идёт окно сбора — проверка кук отложена, чтобы не "
+                        "срывать трейд (запусти после окна)"}
     log("🍪 cookie.check: запускаю services/rega/main.py check")
     subprocess.Popen(
         [sys.executable, str(BASE / "services" / "rega" / "main.py"), "check"],
@@ -373,6 +446,7 @@ TASKS_SYNC = {
     "harvest.start":  task_harvest_start,
     "harvest.stop":   task_harvest_stop,
     "rega.start":     task_rega_start,
+    "rega.switch":    task_rega_switch,
     "cookie.check":   task_cookie_check,
     "bypass.run":     task_bypass_run,
 }

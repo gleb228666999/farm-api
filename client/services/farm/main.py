@@ -82,6 +82,34 @@ v16.2 (оригинал):
 - ✅ com.roblox.client запускается ТОЛЬКО при байпасе, ферма его игнорирует
 - ✅ Мониторинг фермы каждые 30 сек — если окно не видно, пакет перезапускается
 - ✅ Если пакет вылетел, перед перезапуском тоже ожидание 15 сек
+
+v0.20 (🛡 БЕЗОПАСНЫЙ СБОР-ТРЕЙД + kill-switch регы):
+- ✅ РЕГА АККОВ — kill-switch: клиент пишет info/rega_switch.json (задача
+    rega.switch с сервера: тумблер дашборда + hello-sync). Файла нет = ВЫКЛЮЧЕНА
+    (безопасный режим по умолчанию — чтобы случайно не удалить/не перезаписать
+    акки с лутом). При отключенной реге handle_no_cookies НЕ регистрирует:
+    пишет событие rega.blocked и ждёт (фарм клонами продолжается).
+- ✅ СБОР УРОЖАЯ v2 = БЕЗОПАСНЫЙ ТРЕЙД (по скриптам хозяина):
+    • на время окна автоэкзекют Дельты = treid.lua (масс-трейд ВСЕГО лута
+      целевым аккам-сборщикам, качается с GitHub, кэш info/harvest_treid.lua);
+    • приватные сервера — ТОЛЬКО из id.txt хозяина (32-симв. share-коды,
+      кэш info/harvest_ids.txt); клоны расходятся по привяткам по кругу;
+    • вылетевший клон возвращается НА СВОЙ приватный сервер (grace 90с на
+      долёт через браузерный редирект);
+    • после окна — kill + ВОССТАНОВЛЕНИЕ фарм-скрипта в автоэкзекюте (любой
+      исход: окно кончилось / байпас / падение — finally);
+    • 🛡 АККИ НЕ ТРОГАЕМ: ни куки, ни WebView — только трейд предметов.
+      Нет целей (сборщики офлайн) → treid.lua сам ждёт, лут остаётся на фармере;
+    • treid.lua недоступен (сеть+кэш) → сбор на этом телефоне ОТМЕНЯЕТСЯ
+      (не гоняем фарм-скрипт в приватки впустую);
+    • куки-чек перед стартом: хоть один клон с кукой обязателен (иначе в
+      приватку не зайти).
+- ✅ Окно сбора проверяется В НАЧАЛЕ цикла (ДО куки-гейта): сбору нужны
+    только куки КЛОНОВ, а гейт требует ещё живой акк Дельты — раньше
+    мёртвый main мог блокировать сбор навсегда (с отключенной регой — тем более).
+- ✅ Новый сервис-компаньон services/collector/main.py — телефон-сборщик
+    (порт bank.py хозяина): автоэкзекют = collet.lua (авто-приём трейдов),
+    полный байпас v18.8 (импорт этого модуля), те же приватки из id.txt.
 """
 import os
 import sys
@@ -171,6 +199,16 @@ BYPASS_FORCE_FILE = FARM_BASE / "info" / "bypass_force.json"
 BYPASS_FLAG_TTL = 12 * 3600   # 🆕 v0.18: кнопка «живёт» 12ч — застрявший флаг не гоняет байпас вечно
 
 state = {"last_key_time": 0.0}
+
+# 🌾 v0.20 СБОР-ТРЕЙД: скрипты хозяина на GitHub (raw)
+HARVEST_TREID_URL = "https://raw.githubusercontent.com/gleb228666999/test/refs/heads/main/treid.lua"
+HARVEST_IDS_URL = "https://raw.githubusercontent.com/gleb228666999/test/refs/heads/main/id.txt"
+TREID_CACHE_FILE = FARM_BASE / "info" / "harvest_treid.lua"   # кэш на случай, если GitHub недоступен
+IDS_CACHE_FILE = FARM_BASE / "info" / "harvest_ids.txt"       # (общий кэш с сервисом collector)
+HARVEST_RELAUNCH_GRACE = 90   # сек после запуска в приватку, прежде чем считать клон вылетевшим
+                              # (share-ссылка идёт через браузер — редирект занимает время)
+# 🛡 v0.20 kill-switch регы акков: пишет КЛИЕНТ (rega.switch с сервера)
+REGA_SWITCH_FILE = FARM_BASE / "info" / "rega_switch.json"
 
 
 def log(msg):
@@ -480,10 +518,14 @@ def consume_bypass_request():
 # 📝 DELTA LUA
 # ==========================================
 
-def create_delta_lua():
-    """🔥 ВСЕГДА перезаписывает Delta Lua файл при каждом запуске"""
-    log(f"📝 ПЕРЕЗАПИСЫВАЮ Delta Lua: {DELTA_AUTOEXEC_PATH}")
-    log(f"   📄 Содержимое: {DELTA_LUA_CONTENT}")
+def create_delta_lua(content=None):
+    """🔥 ВСЕГДА перезаписывает Delta Lua файл при каждом запуске.
+    🆕 v0.20: content=None → фарм-скрипт (DELTA_LUA_CONTENT); при СБОРЕ сюда
+    пишется treid.lua, после окна вызываем без аргумента — возвращаем фарм."""
+    lua = content if content is not None else DELTA_LUA_CONTENT
+    label = "treid.lua (СБОР)" if content is not None else "фарм-скрипт"
+    log(f"📝 ПЕРЕЗАПИСЫВАЮ Delta Lua: {DELTA_AUTOEXEC_PATH} ({label})")
+    log(f"   📄 Начало: {lua[:60]}")
 
     try:
         folder = os.path.dirname(DELTA_AUTOEXEC_PATH)
@@ -492,17 +534,17 @@ def create_delta_lua():
             log(f"   📁 Создана папка: {folder}")
 
         with open(DELTA_AUTOEXEC_PATH, 'w') as f:
-            f.write(DELTA_LUA_CONTENT)
+            f.write(lua)
 
         run_su(f"chmod 644 '{DELTA_AUTOEXEC_PATH}'", timeout=3)
 
         try:
             with open(DELTA_AUTOEXEC_PATH, 'r') as f:
-                content = f.read().strip()
-            if content == DELTA_LUA_CONTENT:
+                content_read = f.read().strip()
+            if content_read == lua.strip():
                 log("✅ Delta Lua перезаписан УСПЕШНО")
             else:
-                log(f"⚠️ Содержимое отличается! Записано: {content[:50]}")
+                log(f"⚠️ Содержимое отличается! Записано: {content_read[:50]}")
         except Exception as e:
             log(f"⚠️ Не удалось проверить содержимое: {e}")
 
@@ -512,7 +554,7 @@ def create_delta_lua():
 
         log("🔄 Пробую через su...")
         try:
-            escaped_content = DELTA_LUA_CONTENT.replace("'", "'\"'\"'")
+            escaped_content = lua.replace("'", "'\"'\"'")
             ok, out, err = run_su(f"echo '{escaped_content}' > '{DELTA_AUTOEXEC_PATH}'", timeout=5)
             if ok:
                 run_su(f"chmod 644 '{DELTA_AUTOEXEC_PATH}'", timeout=3)
@@ -606,6 +648,79 @@ def launch_roblox_light_farm(place=None):
 
 
 # ==========================================
+# ⬇ СКАЧИВАНИЕ СКРИПТОВ СБОРА (с кэш-фоллбэком)
+# ==========================================
+
+def fetch_text(url, cache_path, timeout=25):
+    """⬇ Текст по HTTP с кэш-фоллбэком: скачали → сохранили в кэш;
+    сеть упала → отдаём кэш; и то и другое не вышло → None."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "FarmBot/16.6"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = r.read().decode("utf-8", errors="replace")
+        if text and text.strip():
+            try:
+                tmp = Path(str(cache_path) + ".tmp")
+                tmp.write_text(text)
+                tmp.replace(cache_path)      # атомарно
+            except Exception:
+                pass
+            return text
+    except Exception as e:
+        log(f"⬇ {str(url).rsplit('/', 1)[-1]}: сеть не удалась ({e})")
+    try:
+        if Path(cache_path).exists():
+            text = Path(cache_path).read_text(errors="replace")
+            if text.strip():
+                log(f"📂 Использую кэш: {Path(cache_path).name}")
+                return text
+    except Exception:
+        pass
+    return None
+
+
+def parse_share_codes(text):
+    """Из id.txt достаём 32-символьные hex share-коды приваток
+    (устойчиво к пробелам, переводам строк и посторонним пояснениям)."""
+    seen, out = set(), []
+    for m in re.findall(r'\b[0-9a-fA-F]{32}\b', text or ""):
+        c = m.lower()
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def launch_farmers_private(codes):
+    """🚜 v0.20: запуск клонов НА ПРИВАТНЫЕ СЕРВЕРА (как в скрипте сборщика
+    bank.py): браузерная share-ссылка → редирект в Roblox; фолбэк — прямой
+    deep link в плейс. Коды расходятся по клонам ПО КРУГУ.
+    Возвращает (пакеты, {pkg: share-ссылка для перезапуска}; "" = перезапуск в плейс)."""
+    farm_pkgs = get_farm_packages()
+    launch_map = {}
+    if not farm_pkgs:
+        log("⚠️ Нет пакетов для фарма")
+        return [], {}
+    launched = 0
+    for i, pkg in enumerate(farm_pkgs):
+        code = codes[i % len(codes)]
+        share = f"https://www.roblox.com/share?code={code}&type=Server"
+        launch_map[pkg] = share
+        log(f"🔗 [{i + 1}] {pkg} → приватка {code[:8]}…")
+        ok1, _, _ = run_su(f"am start -a android.intent.action.VIEW -d '{share}' {pkg}", timeout=10)
+        if not ok1:
+            log(f"   ⚠️ share-ссылка не сработала — фолбэк: deep link в плейс {PLACE_ID}")
+            run_su(f"am start -a android.intent.action.VIEW -d 'roblox://experiences/start?placeId={PLACE_ID}' {pkg}", timeout=5)
+            launch_map[pkg] = ""          # перезапускать будем в плейс
+        launched += 1
+        time.sleep(2)
+    log(f"   ✅ Фермеров запущено в приватки: {launched}")
+    log("   ⏳ Жду 5 сек на обработку share-ссылок браузером...")
+    time.sleep(5)
+    return farm_pkgs, launch_map
+
+
+# ==========================================
 # 🔍 МОНИТОРИНГ ВИДИМОСТИ ОКОН
 # ==========================================
 
@@ -685,26 +800,40 @@ def is_pkg_visible(pkg, win_out, act_out):
     return False
 
 
-def restart_pkg(pkg, place=None):
-    """🔄 Принудительно останавливает пакет, ждет 15 сек и запускает его снова в плейс"""
+def restart_pkg(pkg, place=None, link=None):
+    """🔄 Принудительно останавливает пакет, ждет 15 сек и запускает его снова.
+    🆕 v0.20: link — share-ссылка приватки (сбор): клон возвращается НА СВОЙ
+    приватный сервер; link="" или None — как раньше, deep link в плейс."""
     place = place or PLACE_ID
-    emit("farm.restart", pkg=pkg)
+    emit("farm.restart", pkg=pkg, private=bool(link))
     log(f"⚠️ Окно {pkg} не видно → останавливаю пакет...")
     run_su(f"am force-stop {pkg}", timeout=5)
 
     log(f"⏳ Ожидание {FARM_RESTART_DELAY} секунд перед перезапуском {pkg}...")
     time.sleep(FARM_RESTART_DELAY)
 
+    if link:
+        log(f"🚀 Повторный запуск {pkg} НА ПРИВАТНЫЙ СЕРВЕР...")
+        ok, _, _ = run_su(f"am start -a android.intent.action.VIEW -d '{link}' {pkg}", timeout=10)
+        if not ok:
+            log(f"   ⚠️ share-ссылка не сработала — фолбэк: deep link в плейс {place}")
+            run_su(f"am start -a android.intent.action.VIEW -d 'roblox://experiences/start?placeId={place}' {pkg}", timeout=5)
+        return
     deep_link = f"'roblox://experiences/start?placeId={place}'"
     log(f"🚀 Повторный запуск {pkg} в плейс {place}...")
     run_su(f"am start -a android.intent.action.VIEW -d {deep_link} {pkg}", timeout=5)
 
 
-def monitor_farm(duration, farm_pkgs, harvest=False):
+def monitor_farm(duration, farm_pkgs, harvest=False, launch_map=None):
     """👁 Мониторинг фермы: каждые FARM_CHECK_INTERVAL секунд проверяет видимость окон.
     Одна компактная строка на проверку (ротации логов нет) + отдельные строки на перезапуски.
     harvest=True — это мониторинг СБОРА: выходим, когда окно сбора исчезло.
-    harvest=False — обычный фарм: выходим, когда окно сбора ПОЯВИЛОСЬ (20:00 МСК)."""
+    harvest=False — обычный фарм: выходим, когда окно сбора ПОЯВИЛОСЬ (20:00 МСК).
+    🆕 v0.20: launch_map — {pkg: share-ссылка приватки}: вылетевший клон возвращается
+    НА СВОЙ приватный сервер; на долёт через браузерный редирект даём grace
+    HARVEST_RELAUNCH_GRACE сек (иначе зациклим перезапуски на этапе редиректа)."""
+    launch_map = launch_map or {}
+    last_launch = {p: time.time() for p in launch_map}   # grace при старте сессии
     if not farm_pkgs:
         log("⚠️ Нет пакетов для мониторинга, просто ждём...")
         # даже без пакетов ждём с проверкой окна сбора И флага байпаса
@@ -752,8 +881,13 @@ def monitor_farm(duration, farm_pkgs, harvest=False):
         statuses = []
         for pkg in farm_pkgs:
             if not is_pkg_visible(pkg, win_out, act_out):
+                # 🆕 v0.20: grace после запуска в приватку — ждём долёт (браузер → Roblox)
+                if pkg in launch_map and time.time() - last_launch.get(pkg, 0) < HARVEST_RELAUNCH_GRACE:
+                    statuses.append(f"{pkg.split('.')[-1]}⏳")
+                    continue
                 log(f"⚠️ {pkg} НЕ виден → перезапуск через {FARM_RESTART_DELAY} сек")
-                restart_pkg(pkg)
+                restart_pkg(pkg, link=launch_map.get(pkg) or None)
+                last_launch[pkg] = time.time()
                 time.sleep(2)
                 statuses.append(f"{pkg.split('.')[-1]}♻️")
             else:
@@ -764,30 +898,75 @@ def monitor_farm(duration, farm_pkgs, harvest=False):
 
 
 def run_harvest_session(hw):
-    """🌾 СБОР УРОЖАЯ: на время окна заходим в приватки (плейс из окна),
-    мониторим как фарм. После окна — kill, фарм сам продолжит обычный цикл."""
+    """🌾 СБОР УРОЖАЯ v2 — БЕЗОПАСНЫЙ ТРЕЙД (v0.20, по скриптам хозяина):
+    • treid.lua (GitHub, кэш) на время окна становится автоэкзекютом Дельты —
+      клоны масс-трейдят ВЕСЬ лут целевым аккам-сборщикам;
+    • приватки ТОЛЬКО из id.txt хозяина (share-коды, кэш); клоны по кругу;
+    • вылетевший клон возвращается НА СВОЙ приватный сервер;
+    • после окна (ЛЮБОЙ исход) — kill + восстановление фарм-автоэкзекюта.
+    🛡 АККИ НЕ ТРОГАЕМ: ни куки, ни WebView — только трейд предметов. Цели
+    офлайн → treid.lua сам ждёт, лут остаётся у фармера. treid.lua недоступен
+    (сеть + кэш) → сбор на этом телефоне отменяется (не гоняем фарм-скрипт
+    в приватки впустую)."""
     until = float(hw.get("until_ts") or 0)
     place = hw.get("place_id") or PLACE_ID
     minutes = max(1, int((until - time.time()) // 60))
-    log(f"🌾 СБОР УРОЖАЯ: {minutes} мин в приватке {place}")
-    emit("harvest.start", minutes=minutes, place=place)
-    kill_all_roblox()
-    farm_pkgs = launch_roblox_light_farm(place=place)
-    res = monitor_farm(max(60, until - time.time()), farm_pkgs, harvest=True)
+
+    treid = fetch_text(HARVEST_TREID_URL, TREID_CACHE_FILE)
+    if not treid:
+        log("🛡 treid.lua недоступен (нет сети и кэша) — СБОР ОТМЕНЁН на этом телефоне")
+        emit("harvest.skip", reason="treid.lua недоступен")
+        return None
+
+    codes = parse_share_codes(fetch_text(HARVEST_IDS_URL, IDS_CACHE_FILE) or "")
+    if codes:
+        log(f"🔗 Приватные сервера из id.txt: {len(codes)} шт.")
+    else:
+        log("⚠️ id.txt недоступен — фолбэк: обычный запуск в плейс (трейд будет ждать цели)")
+
+    # 🍪 без кук на клонах в приватки не зайти — не стартуем (куки НЕ трогаем!)
+    farm_pkgs_all = get_farm_packages()
+    with_sess = sum(1 for p in farm_pkgs_all if has_session(p))
+    if farm_pkgs_all and with_sess == 0:
+        log("🛡 У клонов нет живых кук — в приватки не зайти, сбор не запускаю")
+        emit("harvest.skip", reason="нет кук на клонах")
+        return None
+
+    log(f"🌾 СБОР УРОЖАЯ (трейд): {minutes} мин · кук у клонов {with_sess}/{len(farm_pkgs_all)} "
+        f"· приваток {len(codes) or 'нет (плейс)'}")
+    emit("harvest.start", minutes=minutes, place=place,
+         codes=len(codes), clones=len(farm_pkgs_all))
+
+    # 📝 автоэкзекют → treid.lua (после окна вернём фарм-скрипт в finally)
+    create_delta_lua(treid)
+
+    res = None
+    try:
+        kill_all_roblox()
+        if codes:
+            farm_pkgs, launch_map = launch_farmers_private(codes)
+        else:
+            farm_pkgs = launch_roblox_light_farm(place=place)
+            launch_map = {}
+        res = monitor_farm(max(60, until - time.time()), farm_pkgs,
+                           harvest=True, launch_map=launch_map)
+    finally:
+        # 🧹 любой исход: чистим роблоксы и ВОЗВРАЩАЕМ ФАРМ-СКРИПТ
+        try:
+            kill_all_roblox()
+        finally:
+            create_delta_lua()   # фарм 1.lua — дальше обычный фарм
+            log("🔁 Автоэкзекют возвращён к фарм-скрипту")
+
     if res == "bypass":
         # 🆕 v0.18: возвращаем "bypass" — main() СЕЙЧАС съест флаг и сделает байпас,
         # потом сбор продолжится на остаток окна (окно ещё активно).
-        # Раньше возвращали None: main() не знал про флаг → снова запуск сбора →
-        # монитор снова видел флаг → вечный круг «сбор→монитор→bypass» и кнопка
-        # байпаса не работала, пока активно окно сбора.
         emit("harvest.end", reason="bypass_requested",
              minutes_left=max(0, int((until - time.time()) // 60)))
         log("🌾 Сбор прерван байпасом с дашборда — сейчас байпас, потом сбор продолжится")
-        kill_all_roblox()
         return "bypass"
     emit("harvest.end")
     log("🌾 Сбор завершён — закрываю роблоксы, возвращаюсь к фарму")
-    kill_all_roblox()
 
 
 # ==========================================
@@ -1026,9 +1205,28 @@ def stop_rega(timeout_s=8):
     return True
 
 
+def rega_enabled_locally() -> bool:
+    """🛡 v0.20: включена ли рега акков НА ЭТОМ телефоне. Файл пишет КЛИЕНТ
+    (задача rega.switch с сервера — тумблер дашборда + hello-sync).
+    Файла нет = ВЫКЛЮЧЕНА — безопасный режим по умолчанию: акки с лутом
+    защищены от случайной перерегистрации."""
+    try:
+        return bool(json.loads(REGA_SWITCH_FILE.read_text()).get("enabled"))
+    except Exception:
+        return False
+
+
 def handle_no_cookies(reason="нет кук"):
     """🍪 Кук нет (reason — почему) → сначала авторегистрация, потом байпас/фарм.
-    Если рега уже идёт (запущена сервером/клиентом) — просто ждём её."""
+    Если рега уже идёт (запущена сервером/клиентом) — просто ждём её.
+    🛡 v0.20: kill-switch выключен → авторегистрация НЕ запускается:
+    пишем событие и ждём (60с), фарм клонами продолжается как может."""
+    if not rega_enabled_locally():
+        log("🛡 Рега акков ОТКЛЮЧЕНА (safe-режим) — авторегистрацию НЕ запускаю")
+        emit("rega.blocked", reason=reason[:120],
+             note="рега отключена kill-switch — акки с лутом защищены")
+        time.sleep(60)
+        return
     log(f"🆘 Кук нет ({reason}) — байпас и фарм отложены: сначала авторегистрация")
     emit("farm.no_cookies", reason=reason[:120])
     kill_all_roblox()
@@ -1694,7 +1892,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + bypass.run + ландшафт + гейт акка + анти-лупы v0.18, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + безопасный сбор-трейд + kill-switch регы v0.20, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
@@ -1718,6 +1916,32 @@ def main():
          last_key_age_h=round((time.time() - state.get("last_key_time", 0)) / 3600, 1))
 
     while True:
+        # 🌾 ОКНО СБОРА — ПЕРВЫМ ДЕЛОМ (v0.20): сбору нужны только куки КЛОНОВ,
+        # а куки-гейт ниже требует ещё и живой акк Дельты. Раньше мёртвый main
+        # блокировал сбор навсегда (с отключенной регой — тем более).
+        hw = harvest_window()
+        if hw:
+            res = None
+            try:
+                res = run_harvest_session(hw)
+            except Exception as e:
+                log(f"💥 Сбор упал: {e}")
+                emit("harvest.fail", error=str(e)[:200])
+                try:
+                    kill_all_roblox()
+                    create_delta_lua()   # вернуть фарм-скрипт при любом падении
+                except Exception:
+                    pass
+            if res == "bypass":
+                # 🔓 v0.18: сбор прерван кнопкой — байпас СЕЙЧАС. Раньше флаг
+                # не съедался здесь → сбор запускался снова → монитор снова
+                # видел флаг → вечный круг, байпас не выполнялся никогда.
+                if _bypass_gate_ok():
+                    if consume_bypass_request() is not None:
+                        log("🔓 Байпас по кнопке ПРЯМО ВО ВРЕМЯ окна сбора...")
+                        run_bypass_cycle()
+            continue
+
         # 🍪 КУКИ-ГЕЙТ (v0.12): без куки Дельты байпас не сделается,
         # без кук на клонах фармить нечем → сначала рега акков
         try:
@@ -1731,26 +1955,6 @@ def main():
             except Exception as e:
                 log(f"💥 Куки-гейт упал: {e}")
                 time.sleep(300)
-            continue
-
-        # 🌾 ОКНО СБОРА: сервер назначил (20:00 МСК) — сначала сбор
-        hw = harvest_window()
-        if hw:
-            res = None
-            try:
-                res = run_harvest_session(hw)
-            except Exception as e:
-                log(f"💥 Сбор упал: {e}")
-                emit("harvest.fail", error=str(e)[:200])
-                kill_all_roblox()
-            if res == "bypass":
-                # 🔓 v0.18: сбор прерван кнопкой — байпас СЕЙЧАС. Раньше флаг
-                # не съедался здесь → сбор запускался снова → монитор снова
-                # видел флаг → вечный круг, байпас не выполнялся никогда.
-                if _bypass_gate_ok():
-                    if consume_bypass_request() is not None:
-                        log("🔓 Байпас по кнопке ПРЯМО ВО ВРЕМЯ окна сбора...")
-                        run_bypass_cycle()
             continue
 
         now = time.time()

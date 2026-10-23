@@ -16,7 +16,7 @@ faulthandler.register(signal.SIGUSR1)
 from websockets.sync.client import connect
 
 WS = "ws://127.0.0.1:8000/ws"
-DEVICE_ID = "0"
+DEVICE_ID = os.environ.get("MOCK_DEVICE_ID", "0")
 
 EVENTS = [
     {"id": "ev_test_1", "ts": time.time(), "type": "farm.start", "info": {"pid": 123}},
@@ -57,8 +57,12 @@ def make_result(task_id: str, task: str, payload: dict) -> dict:
         data = {"ok": True, "note": "фарм вернётся к обычному циклу"}
     elif task == "rega.start":
         data = {"ok": True, "note": "рега запущена"}
+    elif task == "rega.switch":
+        data = {"ok": True, "rega_enabled": bool(payload.get("enabled")),
+                "note": "kill-switch регы обновлён (mock)"}
     elif task == "bypass.run":
         data = {"ok": True, "farm_was_running": True, "farm_started": False,
+                "collector_running": False,
                 "ts": time.time(), "source": (payload.get("source") or "dashboard"),
                 "note": "фарм выполнит полный байпас v18.8 ≤30с; события bypass.*"}
     elif task == "cookie.check":

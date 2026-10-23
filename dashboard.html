@@ -42,7 +42,7 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button class="big" onclick="farmOn(selected)">🚜 Фарм ▶</button>
 <button class="big r" onclick="farmOff(selected)">🚜 Фарм ⏹</button>
 <button class="big" style="background:#a4a" title="сброс кулдауна ключа → фарм ⏹ → фарм ▶" onclick="bypassSel(selected)">🔓 БАЙПАС</button>
-<button class="big" title="рега 20 попыток на устройстве" onclick="rega(selected)">🆕 Рег акков</button>
+<button class="big" id="btnRega" title="рега 20 попыток на устройстве (работает только при включенной реге)" onclick="rega(selected)">🆕 Рег акков</button>
 <button class="big" onclick="harvestOn(selected)">🌾 Сбор ▶</button>
 <button class="big r" onclick="harvestOff(selected)">🌾 Сбор ⏹</button>
 <button class="big" onclick="cookieCheck(selected)">🍪 Проверка кук</button>
@@ -54,7 +54,7 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button class="big b" onclick="exe(selected)">💻 Exec</button>
 <button class="big g" title="перезапуск клиента на телефоне" onclick="restartCli(selected)">♻️ Restart</button>
 <button class="big r" title="полный стоп клиента и сервисов" onclick="haltCli(selected)">⛔ Halt</button>
-<div class="mut" style="margin-top:6px">🔓 БАЙПАС (v0.18) = полный цикл v18.8 на телефоне: Delta → реклама → ZEN-API → ключ → license. 📱 Ориентация ВСЕГДА горизонтальная. 🍪 ПЕРЕД байпасом — проверка ЖИВОГО акка на главном Roblox (API): нет акка → байпас отменён, рега чинит куки, байпас сам выполнится после (застрявший флаг живёт ≤12ч). ✅ Байпас работает и ВО ВРЕМЯ окна сбора (сбор продолжится после). Вылетевший клон при фарме/сборе сам перезапускается в плейс</div>
+<div class="mut" style="margin-top:6px">🔓 БАЙПАС (v0.18) = полный цикл v18.8 на телефоне: Delta → реклама → ZEN-API → ключ → license. 📱 Ориентация ВСЕГДА горизонтальная. 🍪 ПЕРЕД байпасом — проверка ЖИВОГО акка на главном Roblox (API): нет акка → байпас отменён, флаг сохраняется (🛡 при выключенной реге байпас просто ждёт живой акк). ✅ Байпас работает и ВО ВРЕМЯ окна сбора (сбор продолжится после). Вылетевший клон при фарме/сборе сам перезапускается в плейс/приватку. 🆕 Рег акков работает ТОЛЬКО при включенном тумблере регы (safe-режим по умолчанию)</div>
 </div>
 
 <table><thead><tr><th>гр</th><th>Устройство</th><th>Модель</th><th>Батарея</th>
@@ -76,6 +76,8 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 
 <div class="panel">
 <b>🌾 Сбор + 🆕 Рега (расписание МСК)</b> <span class="mut" id="schedState"></span><br>
+<button id="regaSw" onclick="regaSwitch()" style="padding:5px 12px;font-weight:bold">🆕 Рега акков: ?</button>
+<span class="mut" id="regaSwNote"></span><br>
 <span class="mut">рега ежедневно в</span> <input class="tt" id="regaTime" size="5" value="03:00">
 <span class="mut">сбор в</span> <input class="tt" id="harvestTime" size="5" value="20:00">
 <span class="mut">пачка</span> <input class="tt" id="batchMin" size="3" value="20"> <span class="mut">мин (2 пачки)</span>
@@ -85,7 +87,9 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button onclick="regaNow()">🆕 Рега сейчас</button>
 <button onclick="harvestNow()">🌾 Сбор сейчас</button>
 <button onclick="cookieCheckAll()">🍪 Проверка кук (все фармеры)</button>
-<div class="mut" style="margin-top:4px">фармеры = ВСЕ онлайн-устройства кроме сборщиков (подойдёт любой device_id — и phone_xxx от bootstrap; рекомендуемые имена 0–29) · сборщики: collector-1/2/3 · сбор = 2 пачки по N мин (фармеры пополам) · рега = 2×10 попыток ВСЕГДА, отдых 15 мин после каждых 10, излишки → пул · если устройств не было онлайн в назначенное время — попытка повторится ещё 2 часа</div>
+<div class="mut" style="margin-top:4px">🛡 БЕЗОПАСНЫЙ РЕЖИМ: рега акков ВЫКЛЮЧЕНА — новые акки не регистрируются, куки не перезаписываются, акки с лутом защищены (переключается тумблером выше, синхронизируется на ВСЕ телефоны).
+🌾 СБОР v2 = безопасный трейд: фармеры на время окна запускают treid.lua (масс-трейд лута) и заходят ТОЛЬКО в приватные сервера из id.txt хозяина (качается с GitHub, кэш на телефоне); вылетевший клон возвращается в СВОЮ приватку; после окна фарм-скрипт восстанавливается. Куки/акки при сборе НЕ трогаются — если целей нет, трейд просто ждёт (лут остаётся у фармера).
+📦 СБОРЩИК — ОТДЕЛЬНЫЙ телефон: device_id = collector-1 (в config.json), сервис «collector» (service.start collector): автоэкзекют = collet.lua (авто-приём трейдов), байпас v18.8 по кулдауну 24ч, те же приватки из id.txt. Сборщикам даётся 90с head-start до пачки 1. Фармеры = все онлайн-устройства кроме сборщиков и anon_* · сбор = 2 пачки по N мин (фармеры пополам) · если устройств не было онлайн в назначенное время — попытка повторится ещё 2 часа</div>
 </div>
 
 <div class="panel">
@@ -188,7 +192,8 @@ async function bypassSel(d){
 }
 function rega(d){
   if(!d){show('❌ сначала кликни по устройству');return}
-  if(!confirm('🆕 Рег акков на '+d+'? (20 попыток, отдых 15 мин после каждых 10; случайно запущенные клоны во время реги закрываются автоматически)'))return;
+  if(regaGuarded())return;
+  if(!confirm('🆕 Рег акков на '+d+'? (20 попыток, отдых 15 мин после каждых 10; случайно запущенные клоны во время реги закрываются автоматически)\n\n⚠️ Куки на этом телефоне будут ПЕРЕЗАПИСАНЫ — акк с лутом потеряет доступ!'))return;
   selected=d;run({type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
 }
 function harvestOn(d){
@@ -346,6 +351,45 @@ async function apkAll(){
     +'\n\nрезультат каждого: /api/results/<task_id>\nпри реальном обновлении телефон перезагрузится сам');
 }
 // ---------- ⏰ расписание (рега + сбор) ----------
+window._regaEnabled = null;   // состояние kill-switch (null = ещё не знаем)
+
+function renderRegaSw(){
+  const b=$('regaSw');
+  if(window._regaEnabled===null){b.textContent='🆕 Рега акков: ?';b.style.background='#2a6';$('regaSwNote').textContent='';return}
+  if(window._regaEnabled){
+    b.textContent='🆕 Рега акков: ВКЛ ⚠️';b.style.background='#c93';
+    $('regaSwNote').textContent='регистрация ИДЁТ — акки с лутом могут быть перезаписаны!';
+  }else{
+    b.textContent='🆕 Рега акков: ВЫКЛ 🛡';b.style.background='#a33';
+    $('regaSwNote').textContent='🛡 безопасный режим — акки с лутом защищены';
+  }
+}
+
+async function regaSwitch(){
+  const target=!(window._regaEnabled===true);
+  if(target){
+    if(!confirm('ВКЛЮЧИТЬ регу акков?\nТелефоны снова начнут регистрировать НОВЫЕ акки — куки на клонах будут перезаписываться!\nАкки с лутом могут потеряться.'))return;
+  }else{
+    if(!confirm('ОТКЛЮЧИТЬ регу акков (безопасный режим)?\nАвторегистрация и замена кук остановятся на ВСЕХ телефонах — акки с лутом защищены.\nФарм и СБОР продолжат работать.'))return;
+  }
+  const r=await fetch('/api/rega/switch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:target})});
+  const j=await r.json();
+  window._regaEnabled=!!j.rega_enabled;renderRegaSw();
+  show((j.ok?'🛡 Килл-свитч регы переключён:\n':'❌ ')+(j.note||JSON.stringify(j))
+    +'\n\nотправлено rega.switch на: '+((j.sent||[]).join(', ')||'— (нет телефонов онлайн)')
+    +'\nофлайн-телефоны догонят состояние при следующем подключении');
+  loadSched();
+}
+
+function regaGuarded(){
+  if(window._regaEnabled===false){
+    show('🛡 РЕГА АККОВ ВЫКЛЮЧЕНА (безопасный режим) — акки с лутом защищены.\n\nРегистрация НЕ идёт: ни по кнопке, ни по расписанию, ни автоматически при нехватке кук на телефонах.\n\nВключить: тумблер «🆕 Рега акков» в блоке расписания ниже.');
+    return true;
+  }
+  return false;
+}
+
 async function loadSched(){
   try{
     const r=await fetch('/api/schedule');
@@ -357,13 +401,15 @@ async function loadSched(){
     $('batchMin').value=s.batch_minutes||20;
     $('checkMin').value=s.cookie_check_interval_min||30;
     $('hwPlace').value=s.harvest_place_id||'';
+    if(window._regaEnabled!==!!s.rega_enabled){window._regaEnabled=!!s.rega_enabled;renderRegaSw()}
     const st=j.state||{};
     const on=j.farmers_online||[],tot=j.farmers_total||[];
     $('schedState').textContent='· последняя рега: '+(st.last_rega||'—')
       +' · последний сбор: '+(st.last_harvest||'—')
       +(st.rega_pending&&st.rega_pending.length?' · 🆕 рега идёт: '+st.rega_pending.join(','):'')
       +' · фармеры онлайн: '+on.length+'/'+tot.length+(on.length?' ('+on.join(',')+')':'')
-      +' · сборщики: '+(j.collectors_online||[]).length+'/'+(j.collectors_total||[]).length;
+      +' · сборщики: '+(j.collectors_online||[]).length+'/'+(j.collectors_total||[]).length
+      +(window._regaEnabled===false?' · 🛡 рега ВЫКЛ (safe)':'');
   }catch(e){$('schedState').textContent='· сервер недоступен'}
 }
 async function saveSched(){
@@ -382,6 +428,7 @@ async function saveSched(){
   loadSched();
 }
 async function regaNow(){
+  if(regaGuarded())return;
   if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → рега (20 попыток, отдых 15 мин после каждых 10) → фарм сам вернётся\nслучайно запущенные клоны во время реги закрываются автоматически'))return;
   const r=await fetch('/api/rega/start',{method:'POST'});
   const j=await r.json();
@@ -393,7 +440,7 @@ async function regaNow(){
       +'\n\nстатус: «рега идёт» в шапке блока + события rega.* в 📅');
 }
 async function harvestNow(){
-  if(!confirm('Запустить СБОР УРОЖАЯ сейчас?\n2 пачки по '+$('batchMin').value+' мин (фармеры пополам) + сборщики'))return;
+  if(!confirm('Запустить СБОР УРОЖАЯ сейчас?\n🛡 безопасный трейд: фармеры зайдут в приватки из id.txt с treid.lua (масс-трейд лута целям)\n2 пачки по '+$('batchMin').value+' мин (фармеры пополам) + сборщикам 90с head-start\n\nКуки/акки НЕ трогаются. Нет сборщиков онлайн — трейд встанет в ожидание, лут НЕ потеряется'))return;
   const r=await fetch('/api/harvest/start',{method:'POST'});
   const j=await r.json();
   if(!j.ok){
@@ -474,7 +521,7 @@ async function refresh(){
       return `<tr${sel} onclick="selected='${d.device_id}'">
         <td><input type="checkbox" class="chk" ${checked.has(d.device_id)?'checked':''}
              onclick="event.stopPropagation()" onchange="chk('${d.device_id}',this.checked)"></td>
-        <td>${d.device_id} ${d.online?'<span class="on">●</span>':'<span class="off">●</span>'}${gb}</td>
+        <td>${d.device_id}${d.device_id.startsWith('collector-')?' <span class="gbadge">📦 сборщик</span>':''} ${d.online?'<span class="on">●</span>':'<span class="off">●</span>'}${gb}</td>
         <td>${model}</td><td>${bat}%</td><td>${keyAge(d)}</td><td>${d.client_version||'?'}</td>
         <td>${Math.round(d.uptime_sec/60)}м</td><td>${d.last_seen_sec}с</td>
         <td><button onclick="ping('${d.device_id}')">ping</button>

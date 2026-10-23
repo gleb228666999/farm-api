@@ -16,5 +16,11 @@
     "command": "python services/rega/main.py",
     "autostart": false,
     "restart": false
+  },
+  "collector": {
+    "type": "daemon",
+    "command": "python services/collector/main.py",
+    "autostart": false,
+    "restart": true
   }
 }

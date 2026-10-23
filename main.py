@@ -15,6 +15,19 @@
 - /                        дашборд (dashboard.html)
 - v0.15: /api/devices/{id}/send, /api/broadcast, /api/groups/{name}/send —
           type:"task" ставится АВТОМАТИЧЕСКИ (клиент отвечает только на type=task)
+- v0.7: 🛡 БЕЗОПАСНЫЙ РЕЖИМ — kill-switch регы акков:
+    • rega_enabled=false в расписании (по умолчанию ВЫКЛЮЧЕНА — чтобы случайно
+      не удалились/не перезаписались акки с лутом); кнопки «Рега сейчас» и
+      расписание отказывают с объяснением;
+    • POST /api/rega/switch — тумблер: сохраняет флаг + шлёт rega.switch всем
+      онлайн-телефонам (клиент пишет info/rega_switch.json — фарм-гейт тоже
+      перестаёт регистрировать);
+    • при hello сервер сам отправляет rega.switch — офлайн-телефоны догоняют
+      состояние при каждом коннекте;
+    • сбор v2: сборщикам (collector-*) даётся 90с head-start (байпас+выход в
+      приватки) до пачки 1; предупреждение, если сборщиков нет (лут НЕ теряется —
+      treid.lua на фармерах сам ждёт цели);
+    • cookie.check НЕ шлётся во время активного сбора (не мешать трейду).
 """
 import json
 import time
@@ -227,6 +240,18 @@ async def ws_endpoint(ws: WebSocket):
                     sender_task = asyncio.create_task(sender())
                 log(f"[+] {device_id} connected ({len(devices)} online)")
                 await queue.put({"type": "welcome", "server_time": now(), "online": len(devices)})
+                # 🛡 v0.7: синхронизация kill-switch регы при каждом коннекте —
+                # телефон, который был офлайн во время переключения тумблера,
+                # догоняет состояние сам (пишет info/rega_switch.json)
+                try:
+                    cfg_now = load_schedule()
+                    await queue.put({
+                        "type": "task", "task": "rega.switch",
+                        "payload": {"enabled": bool(cfg_now.get("rega_enabled", False)),
+                                    "source": "server-hello-sync"},
+                        "task_id": f"regasw_{secrets.token_hex(3)}"})
+                except Exception as e:
+                    log(f"[!] rega.switch sync {device_id}: {e}")
 
             elif t == "heartbeat":
                 d = devices.get(device_id)
@@ -668,6 +693,8 @@ CATCHUP_MIN = 120                            # сколько минут пос�
 DEFAULT_SCHEDULE = {
     "enabled": True,
     "rega_time": "03:00",            # МСК — авторегистрация новых акков ежедневно
+    "rega_enabled": False,           # 🛡 v0.7: рега акков ВЫКЛЮЧЕНА (безопасный режим,
+                                     #         чтобы случайно не потерять акки с лутом)
     "harvest_time": "20:00",         # МСК — сбор урожая
     "batch_minutes": 20,             # 1 пачка = 20 мин, всего 2 пачки = 40 мин
     "cookie_check_interval_min": 30, # проверка кук на всех фармерах
@@ -762,8 +789,13 @@ async def orchestrate_rega():
     """Рега на всех онлайн-фармерах: farm ⏹ → пауза → rega.start.
     Когда телефон закончит, он сам поднимет фарм (watchdog) + пришлёт rega.done.
     День (last_rega) помечается ТОЛЬКО если запуск реально начался — иначе
-    попытка не сгорает и планировщик повторит в течение catchup-окна."""
+    попытка не сгорает и планировщик повторит в течение catchup-окна.
+    🛡 v0.7: если rega_enabled=false — отказ БЕЗ запуска (безопасный режим:
+    чтобы случайно не удалить/не перезаписать акки с лутом)."""
     cfg = load_schedule()
+    if not cfg.get("rega_enabled", False):
+        log("[🆕] Рега ОТКЛЮЧЕНА (rega_enabled=false) — запуск заблокирован (безопасный режим)")
+        return {"sent": [], "note": "рега отключена (rega_enabled=false)"}
     farmers = farmers_online()
     if not farmers:
         log("[🆕] Рега: нет онлайн-фармеров — день НЕ помечен, попробуем снова")
@@ -786,9 +818,17 @@ async def orchestrate_rega():
     return {"sent": sent}
 
 
+_HARVEST_RUNNING = False   # 🌾 v0.7: True пока идёт harvest_flow (cookie.check ждёт)
+
+
 async def harvest_flow() -> bool:
-    """🌾 Сбор урожая: сборщики на 40 мин, фармеры 2 пачками по 20 мин.
-    День (last_harvest) помечается ТОЛЬКО если запуск реально начался."""
+    """🌾 Сбор урожая v2 (безопасный трейд): сборщики на всё окно (40 мин +
+    90с head-start на байпас/выход в приватки), фармеры 2 пачками по 20 мин.
+    День (last_harvest) помечается ТОЛЬКО если запуск реально начался.
+    🛡 Сборщики — ОТДЕЛЬНЫЕ телефоны collector-* (сервис collector, скрипт
+    bank.py): их акки принимают трейды. Если сборщиков нет — сбор всё равно
+    идёт: фармеры зайдут в приватки, treid.lua сам будет ждать цели — ЛУТ НЕ ТЕРЯЕТСЯ."""
+    global _HARVEST_RUNNING
     cfg = load_schedule()
     mins = max(1, int(cfg.get("batch_minutes", 20)))
     place = cfg.get("harvest_place_id") or ""
@@ -803,20 +843,31 @@ async def harvest_flow() -> bool:
     mid = (len(farmers) + 1) // 2               # нечётное число → лишний в пачке 1 (старт сразу)
     b1, b2 = farmers[:mid], farmers[mid:]
     log(f"[🌾] Сбор {mins}+{mins} мин: пачка1={b1 or '—'} | пачка2={b2 or '—'} | сборщики={collectors}")
-    for did in collectors:
-        await send_task(did, "harvest.start", {"minutes": mins * 2, "place_id": place})
-    for did in b1:
-        await send_task(did, "harvest.start", {"minutes": mins, "place_id": place})
-    await asyncio.sleep(mins * 60)
-    log("[🌾] Сбор: пачка 2")
-    for did in b2:
-        await send_task(did, "harvest.start", {"minutes": mins, "place_id": place})
-    await asyncio.sleep(mins * 60)
-    for did in collectors:
-        await send_task(did, "harvest.stop", {})
-    for did in farmers:
-        await send_task(did, "harvest.stop", {})
-    log("[🌾] Сбор завершён — фарм продолжает обычный цикл")
+    if not collectors:
+        log("[🌾] ⚠️ Сборщиков (collector-*) нет онлайн — фармеры всё равно выйдут в приватки, "
+            "трейд будет ждать целей (безопасно, лут остаётся у фармеров)")
+    _HARVEST_RUNNING = True
+    try:
+        for did in collectors:
+            # +2 мин запаса: окно сборщика покрывает head-start + обе пачки
+            await send_task(did, "harvest.start", {"minutes": mins * 2 + 2, "place_id": place})
+        if collectors:
+            log("[🌾] Сборщикам 90с head-start (байпас + выход в приватки) — потом пачка 1")
+            await asyncio.sleep(90)
+        for did in b1:
+            await send_task(did, "harvest.start", {"minutes": mins, "place_id": place})
+        await asyncio.sleep(mins * 60)
+        log("[🌾] Сбор: пачка 2")
+        for did in b2:
+            await send_task(did, "harvest.start", {"minutes": mins, "place_id": place})
+        await asyncio.sleep(mins * 60)
+        for did in collectors:
+            await send_task(did, "harvest.stop", {})
+        for did in farmers:
+            await send_task(did, "harvest.stop", {})
+        log("[🌾] Сбор завершён — фарм продолжает обычный цикл")
+    finally:
+        _HARVEST_RUNNING = False
     return True
 
 
@@ -865,10 +916,9 @@ async def schedule_loop():
                     st2["rega_pending"] = []
                     save_sched_state(st2)
 
-                # день НЕ помечаем заранее — это делает orchestrate_rega()/harvest_flow()
-                # только при РЕАЛЬНОМ старте; если устройств не было онлайн, попытка
-                # повторится на следующем тике (пока не вышло catchup-окно)
-                if (_hhmm_passed(now_msk, cfg.get("rega_time", "03:00"))
+                # 🛡 v0.7: рега работает ТОЛЬКО при rega_enabled=true (тумблер на дашборде)
+                if (cfg.get("rega_enabled", False)
+                        and _hhmm_passed(now_msk, cfg.get("rega_time", "03:00"))
                         and _within_catchup(now_msk, cfg.get("rega_time", "03:00"))
                         and st.get("last_rega") != today
                         and not st.get("rega_pending")):
@@ -879,7 +929,9 @@ async def schedule_loop():
                         and st.get("last_harvest") != today):
                     spawn_bg(harvest_flow())
 
-                if not st.get("rega_pending"):
+                if not st.get("rega_pending") and not _HARVEST_RUNNING:
+                    # 🛡 v0.7: во время активного сбора проверку кук НЕ шлём —
+                    # check перезапускает клоны и мешает трейду
                     interval_min = max(5, int(cfg.get("cookie_check_interval_min", 30)))
                     if now() - st.get("last_check", 0) >= interval_min * 60:
                         st["last_check"] = now()
@@ -921,7 +973,13 @@ async def api_schedule_set(body: dict):
 @app.post("/api/rega/start")
 async def api_rega_now():
     """Кнопка «Рега сейчас» — вне расписания. Честный ответ: если фармеров
-    онлайн нет — ok:false и список, а не безликое «запускается»"""
+    онлайн нет — ok:false и список, а не безликое «запускается».
+    🛡 v0.7: при rega_enabled=false — отказ (безопасный режим)."""
+    if not load_schedule().get("rega_enabled", False):
+        log("[🆕] Рега сейчас: ОТКЛЮЧЕНА (rega_enabled=false)")
+        return {"ok": False, "farmers": [], "farmers_total": farmers_total(),
+                "note": "🛡 рега ОТКЛЮЧЕНА (безопасный режим — акки с лутом защищены). "
+                        "Включи тумблером «🆕 Рега акков» в блоке расписания"}
     farmers = farmers_online()
     if not farmers:
         log("[🆕] Рега сейчас: нет онлайн-фармеров")
@@ -930,6 +988,31 @@ async def api_rega_now():
     spawn_bg(orchestrate_rega())
     return {"ok": True, "farmers": farmers,
             "note": "рега запускается (farm ⏹ → 30с → rega.start)"}
+
+
+@app.post("/api/rega/switch")
+async def api_rega_switch(body: dict):
+    """🛡 v0.7: тумблер регы акков. Сохраняет rega_enabled в расписании и шлёт
+    rega.switch всем онлайн-телефонам (клиент пишет info/rega_switch.json —
+    фарм-гейт и кнопка «Рег акков» на телефоне подчиняются). Офлайн-телефоны
+    догонят состояние при следующем hello (сервер шлёт rega.switch сам)."""
+    enabled = bool(body.get("enabled"))
+    cfg = load_schedule()
+    cfg["rega_enabled"] = enabled
+    save_schedule(cfg)
+    sent = []
+    for did in list(devices.keys()):
+        if did.startswith("anon_") or not device_online(did):
+            continue
+        if await send_task(did, "rega.switch", {"enabled": enabled}):
+            sent.append(did)
+    log(f"[🛡] Рега акков {'ВКЛЮЧЕНА' if enabled else 'ОТКЛЮЧЕНА (безопасный режим)'} "
+        f"— rega.switch отправлен: {sent or '—'} (офлайн догонят при hello)")
+    return {"ok": True, "rega_enabled": enabled, "sent": sent,
+            "note": ("рега ВКЛЮЧЕНА — телефоны снова регистрируют акки"
+                     if enabled else
+                     "🛡 рега ОТКЛЮЧЕНА — авторегистрация и замена кук остановлены, "
+                     "акки с лутом защищены")}
 
 
 @app.post("/api/harvest/start")
