@@ -77,6 +77,29 @@ function ScheduleInner() {
     }
   }
 
+  // 🛡 v0.23: тумблер «Рега акков» — kill-switch через /api/rega/switch
+  // (сервер сохраняет флаг и сразу шлёт rega.switch всем онлайн-телефонам;
+  // клиент пишет info/rega_switch.json и УБИВАЕТ идущую регу)
+  async function toggleRega(v: boolean) {
+    if (!cfg) return;
+    setCfg({ ...cfg, rega_enabled: v });   // оптимистично
+    const res = await call({
+      label: v ? "🛡 Рега акков: включить" : "🛡 Рега акков: выключить",
+      method: "POST",
+      path: "/api/rega/switch",
+      body: { enabled: v },
+      busyKey: "rega-switch",
+    });
+    if (res.ok) {
+      toast.success(v ? "🆕 Рега акков ВКЛЮЧЕНА" : "🛡 Рега акков ВЫКЛЮЧЕНА",
+        { description: (res.data as { note?: string })?.note || undefined });
+      void refresh(true);
+    } else {
+      setCfg({ ...cfg, rega_enabled: !v });   // откат при ошибке
+      toast.error("Не переключилось", { description: res.error || undefined });
+    }
+  }
+
   const b = (k: string) => !!busy[k];
 
   if (!cfg) {
@@ -106,6 +129,24 @@ function ScheduleInner() {
           </div>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2">
+          <div className="sm:col-span-2 rounded-md border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <Label className="text-xs font-semibold">🛡 Рега акков (kill-switch)</Label>
+                <p className="text-[11px] text-muted-foreground">
+                  {cfg.rega_enabled
+                    ? "ВКЛЮЧЕНА — телефоны могут регистрировать и заменять акки"
+                    : "ВЫКЛЮЧЕНА (безопасный режим) — акки с лутом защищены"}
+                </p>
+              </div>
+              <Switch
+                id="rega-enabled"
+                checked={cfg.rega_enabled}
+                disabled={b("rega-switch")}
+                onCheckedChange={(v) => void toggleRega(v)}
+              />
+            </div>
+          </div>
           <div className="grid gap-1.5">
             <Label className="text-xs">🆕 Рега ежедневно (ЧЧ:ММ)</Label>
             <Input

@@ -60,6 +60,7 @@ export type FarmGroup = {
 
 export type ScheduleConfig = {
   enabled: boolean;
+  rega_enabled: boolean;
   rega_time: string;
   harvest_time: string;
   batch_minutes: number;

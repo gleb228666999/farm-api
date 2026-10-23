@@ -66,6 +66,22 @@ except Exception:
 SERVER = (CONFIG.get("server_url") or "").rstrip("/")
 DEVICE_ID = str(CONFIG.get("device_id") or "?")
 
+# 🛡 v0.23 KILL-SWITCH регы акков: файл пишет КЛИЕНТ (rega.switch с сервера —
+# тумблер дашборда + hello-sync). Файла нет / enabled=false → рега ЗАПРЕЩЕНА.
+# Проверяется В САМОМ рега-сервисе: при старте и ПЕРЕД КАЖДОЙ попыткой —
+# тумблер останавливает даже уже идущую регу (раньше сервис свитч не читал
+# ВООБЩЕ: запущенная рега продолжала стирать/регистрировать акки после
+# выключения тумблера — дашборд показывал «выключено», акки продолжали банить).
+REGA_SWITCH_FILE = BASE / "info" / "rega_switch.json"
+
+
+def rega_allowed():
+    """🛡 True — рега акков разрешена тумблером (kill-switch)."""
+    try:
+        return bool(json.loads(REGA_SWITCH_FILE.read_text()).get("enabled"))
+    except Exception:
+        return False
+
 PACKAGE_MAIN = "com.roblox.client"
 PLACE_ID = "142823291"                             # фарм-плейс (куда возвращать клоны)
 
@@ -1385,6 +1401,13 @@ def collect_cookies(target_total):
     while done < REG_TOTAL:
         if stop_requested():
             break
+        # 🛡 v0.23: kill-switch — проверка ПЕРЕД КАЖДОЙ попыткой. Тумблер
+        # «выключено» останавливает идущую регу в течение секунды (клиент
+        # при выключении ещё и убивает процесс — это вторая линия защиты).
+        if not rega_allowed():
+            log("🛡 Рега ОСТАНОВЛЕНА тумблером (kill-switch) — акки с лутом защищены")
+            emit("rega.stop", phase="kill-switch", done=done, saved=len(kept))
+            break
         if done % REG_ATTEMPTS == 0:
             round_num = done // REG_ATTEMPTS + 1
             log(f"🔁 Подход {round_num}/{MAX_ROUNDS} | сделано {done} | аккаунтов {len(kept)}/{target_total}")
@@ -1797,6 +1820,17 @@ def main():
         except Exception as e:
             log(f"💥 check упал: {e}")
             emit("check.fail", error=str(e)[:200])
+        return
+
+    # 🛡 v0.23: KILL-SWITCH ДО СТАРТА регистрации. Раньше сервис свитч не
+    # проверял ВООБЩЕ — рега стартовала стирать акки (archive_and_clear_cookies
+    # + soft_logout_all) даже при выключенном тумблере.
+    if not rega_allowed():
+        log("🛡 Рега акков ОТКЛЮЧЕНА тумблером (kill-switch) — НЕ регистрирую, выхожу")
+        emit("rega.stop", phase="kill-switch")
+        # farm ⏹ уже сделал сервер/клиент перед rega.start — реармит фарм,
+        # иначе телефон простоит до 4ч до принудительного farm ▶ на сервере
+        rearm_farm()
         return
 
     emit("rega.start", target=DEFAULT_TARGET, device=DEVICE_ID)

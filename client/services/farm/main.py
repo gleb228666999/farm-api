@@ -247,6 +247,7 @@ HARVEST_RELAUNCH_GRACE = 90   # сек после запуска в приват
                               # (share-ссылка идёт через браузер — редирект занимает время)
 # 🛡 v0.20 kill-switch регы акков: пишет КЛИЕНТ (rega.switch с сервера)
 REGA_SWITCH_FILE = FARM_BASE / "info" / "rega_switch.json"
+_last_blocked_emit = [0.0]   # 🛡 v0.23: троттлинг rega.blocked (не спамить 60 раз в час)
 
 
 def log(msg):
@@ -1291,8 +1292,12 @@ def handle_no_cookies(reason="нет кук"):
     пишем событие и ждём (60с), фарм клонами продолжается как может."""
     if not rega_enabled_locally():
         log("🛡 Рега акков ОТКЛЮЧЕНА (safe-режим) — авторегистрацию НЕ запускаю")
-        emit("rega.blocked", reason=reason[:120],
-             note="рега отключена kill-switch — акки с лутом защищены")
+        # 🛡 v0.23: событие раз в 30 мин (раньше — каждую минуту: 60 событий/час
+        # забивали ленту 📅 и мешали видеть реальное состояние)
+        if time.time() - _last_blocked_emit[0] > 1800:
+            _last_blocked_emit[0] = time.time()
+            emit("rega.blocked", reason=reason[:120],
+                 note="рега отключена kill-switch — акки с лутом защищены")
         time.sleep(60)
         return
     log(f"🆘 Кук нет ({reason}) — байпас и фарм отложены: сначала авторегистрация")
@@ -1300,6 +1305,12 @@ def handle_no_cookies(reason="нет кук"):
     kill_all_roblox()
 
     for attempt in (1, 2):
+        # 🛡 v0.23: повторная проверка тумблера перед КАЖДЫМ спавном —
+        # пользователь мог выключить регу, пока мы ждали лок/идущую регу
+        if not rega_enabled_locally():
+            log("🛡 Рега отключена тумблером (kill-switch) во время ожидания — отменяю")
+            emit("rega.blocked", reason="switch off during wait", note="kill-switch сработал между попытками")
+            return
         pid = _rega_pid()
         if pid:
             log(f"🕒 Рега уже идёт (pid {pid}) — жду окончания...")

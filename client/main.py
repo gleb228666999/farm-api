@@ -202,7 +202,10 @@ def rega_switch_enabled() -> bool:
 
 
 def task_rega_switch(payload: dict) -> dict:
-    """🛡 Сервер включил/выключил регу акков (тумблер дашборда / hello-sync)."""
+    """🛡 Сервер включил/выключил регу акков (тумблер дашборда / hello-sync).
+    🆘 v0.23: при ВЫКЛЮЧЕНИИ — убиваем ИДУЩУЮ регу (раньше процесс продолжал
+    стирать/регистрировать акки после выключения тумблера — дашборд показывал
+    «выключено», а акки банило). Режим check НЕ трогаем — он только чинит куки."""
     enabled = bool(payload.get("enabled"))
     data = {"enabled": enabled, "ts": round(time.time(), 1),
             "source": str(payload.get("source") or "server")}
@@ -210,7 +213,45 @@ def task_rega_switch(payload: dict) -> dict:
     tmp.write_text(json.dumps(data))
     tmp.replace(REGA_SWITCH_FILE)                       # атомарно
     log(f"🛡 Рега акков {'ВКЛЮЧЕНА' if enabled else 'ОТКЛЮЧЕНА (безопасный режим, акки защищены)'}")
-    return {"ok": True, "rega_enabled": enabled}
+    killed = []
+    if not enabled:
+        killed = kill_running_rega(reason="rega.switch: выключение")
+    return {"ok": True, "rega_enabled": enabled,
+            "killed_pids": killed}
+
+
+def kill_running_rega(reason=""):
+    """🆘 v0.23: убить процессы рега-сервиса (РЕЖИМ rega, НЕ check) — по /proc.
+    Рега стирает и перерегистрирует акки, поэтому при выключении тумблера её
+    надо убить НЕМЕДЛЕННО, не дожидаясь собственной проверки свитча между
+    попытками (та — вторая линия защиты). Возвращает список убитых pid."""
+    killed = []
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            cl = (d / "cmdline").read_bytes().decode(errors="replace").replace("\x00", " ")
+        except Exception:
+            continue
+        if "services/rega/main.py" not in cl or " check" in cl:
+            continue          # check-режим не трогаем — он ничего не регистрирует
+        pid = int(d.name)
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+            log(f"🛡 Убит процесс регы pid {pid} ({reason})")
+        except Exception:
+            pass
+    if killed:
+        time.sleep(2)
+        for pid in killed:
+            try:
+                os.kill(pid, signal.SIGKILL)   # добить, если не вышел
+            except Exception:
+                pass
+    return killed
 
 
 def harvest_window_active() -> bool:
@@ -438,8 +479,19 @@ def task_cookie_check(payload: dict) -> dict:
     return {"ok": True, "note": "проверка запущена в фоне, события придут в 📅"}
 
 
+def _task_service_start(payload: dict) -> dict:
+    """🛡 v0.23: service.start rega подчиняется kill-switch (раньше обходил —
+    сервер/панель могли запустить регу при выключенном тумблере)."""
+    name = str(payload.get("name") or "")
+    if name == "rega" and not rega_switch_enabled():
+        log("🛡 service.start rega ОТКЛОНЁН: рега акков выключена (kill-switch)")
+        return {"ok": False,
+                "error": "🛡 рега акков выключена (kill-switch) — включи тумблером «Рега акков»"}
+    return PM.start(name)
+
+
 TASKS_SYNC = {
-    "service.start":  lambda p: PM.start(p.get("name", "")),
+    "service.start":  _task_service_start,
     "service.stop":   _stop_service,
     "service.status": lambda p: PM.status(),
     "file.read":      task_file_read,

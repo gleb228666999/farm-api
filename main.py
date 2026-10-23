@@ -958,6 +958,7 @@ async def api_schedule_get():
 @app.post("/api/schedule")
 async def api_schedule_set(body: dict):
     cfg = load_schedule()
+    old_rega = bool(cfg.get("rega_enabled", False))
     for k in DEFAULT_SCHEDULE:
         if k in body:
             cfg[k] = body[k]
@@ -967,6 +968,22 @@ async def api_schedule_set(body: dict):
                 raise HTTPException(400, f"{k} должен быть ЧЧ:ММ (00-23:00-59), например 03:00")
     save_schedule(cfg)
     log(f"[⏰] Расписание обновлено: {cfg}")
+    # 🛡 v0.23: rega_enabled изменился через /api/schedule (панель шлёт весь
+    # конфиг целиком) → рассылаем rega.switch, иначе телефоны не узнают и
+    # rega_switch.json разойдётся с сервером (та самая «написано выключено,
+    # а рега работает»). Раньше флаг менялся молча — hello-sync догонял бы
+    # только при переподключении телефона.
+    new_rega = bool(cfg.get("rega_enabled", False))
+    if new_rega != old_rega:
+        sent = []
+        for did in list(devices.keys()):
+            if did.startswith("anon_") or not device_online(did):
+                continue
+            if await send_task(did, "rega.switch", {"enabled": new_rega,
+                                                    "source": "schedule-save"}):
+                sent.append(did)
+        log(f"[🛡] rega_enabled изменён через /api/schedule: {old_rega} → {new_rega} "
+            f"— rega.switch отправлен: {sent or '—'}")
     return {"ok": True, "schedule": cfg}
 
 
