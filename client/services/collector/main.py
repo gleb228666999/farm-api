@@ -29,6 +29,11 @@
     collector клиент не стартует).
 - ✅ Мониторинг окна: вылетевший клон возвращается НА СВОЙ приватный сервер
     (grace 90с на долёт через браузерный редирект, как у фарма).
+- ✅ v1.2: 🌾 СБОР = HOLD (под сервер v0.8 «НОВЫЙ ЦИКЛ»): окно с hold=True —
+    БЕССРОЧНО. Сборщик сидит в приватках с collet.lua и принимает трейды,
+    пока хозяин не нажмёт «НОВЫЙ ЦИКЛ» (придёт harvest.stop — окно снято,
+    роблоксы убраны, ждём следующего окна). Раньше окно жило максимум
+    180 мин и сборщик сам выходил, ломая цикл хозяина.
 - ✅ События → info/farm_events.jsonl (outbox клиента) — видны в 📅 дашборда:
     collector.start / collector.window / collector.window_end /
     collector.restart / collector.bypass.skipped.
@@ -91,13 +96,15 @@ except Exception as e:
 # ==========================================
 
 def harvest_window():
-    """Активное окно сбора или None (нет/истекло/снято)."""
+    """Активное окно сбора или None. 🆕 v1.2: hold=True — окно БЕЗ СРОКА
+    (HOLD — до кнопки «НОВЫЙ ЦИКЛ» на панели)."""
     try:
         hw = json.loads(HARVEST_WINDOW_FILE.read_text())
         until = float(hw.get("until_ts") or 0)
         if time.time() >= until:
             return None
-        return {"until_ts": until, "place_id": str(hw.get("place_id") or "")}
+        return {"until_ts": until, "place_id": str(hw.get("place_id") or ""),
+                "hold": bool(hw.get("hold"))}
     except Exception:
         return None
 
@@ -161,10 +168,12 @@ def launch_targets(codes):
 
 def run_window(hw):
     until = float(hw.get("until_ts") or 0)
+    hold = bool(hw.get("hold"))             # 🆕 v1.2: HOLD — бессрочно, до «НОВЫЙ ЦИКЛ»
     minutes = max(1, int((until - time.time()) // 60))
     codes = get_codes()
-    log(f"📦 ОКНО СБОРА: {minutes} мин · приваток {len(codes) or 'нет (плейс)'}")
-    farm.emit("collector.window", minutes=minutes, codes=len(codes))
+    log(f"📦 ОКНО СБОРА: {'HOLD — до кнопки «НОВЫЙ ЦИКЛ» (бессрочно)' if hold else f'{minutes} мин'}"
+        f" · приваток {len(codes) or 'нет (плейс)'}")
+    farm.emit("collector.window", minutes=(0 if hold else minutes), hold=hold, codes=len(codes))
     farm.kill_all_roblox()
     pkgs, launch_map = launch_targets(codes)
     last_launch = {p: time.time() for p in pkgs}     # grace на долёт
@@ -266,7 +275,7 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
 
-    log("📦 COLLECTOR SERVICE START v1.1 (сборщик: авто-приём трейдов, банк, зашитый фолбэк привяток)")
+    log("📦 COLLECTOR SERVICE START v1.2 (сборщик: авто-приём трейдов, банк, HOLD-окно «НОВЫЙ ЦИКЛ», зашитый фолбэк привяток)")
     log(f"   su: {farm.SU_BIN}")
     log(f"   base: {BASE}")
     log(f"   ZEN-API: {'✅' if farm.ZEN_API_KEY else '❌'} | "

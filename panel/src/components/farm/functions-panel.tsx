@@ -52,6 +52,7 @@ import {
   Globe,
   MonitorSmartphone,
   RefreshCw,
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -83,6 +84,7 @@ export function FunctionsPanel() {
 
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [confirmHalt, setConfirmHalt] = useState(false);
+  const [confirmCycle, setConfirmCycle] = useState(false);
 
   // ---- список устройств (для селектора цели) — тихо, каждые 5с ----
   const refresh = useCallback(async () => {
@@ -241,12 +243,18 @@ export function FunctionsPanel() {
       body: {},
       timeout: 15,
     });
-    if (res.ok) {
-      toast.success(`${label}: запущено`);
+    const d = res.data as { ok?: boolean; note?: string } | null;
+    if (res.ok && d?.ok !== false) {
+      toast.success(`${label}: запущено`, { description: d?.note || undefined });
     } else {
-      toast.error(`${label}: ошибка`, { description: res.error || undefined });
+      toast.error(`${label}: не выполнено`, {
+        description: d?.note || res.error || undefined,
+      });
     }
   }
+
+  // ---------- 🔁 НОВЫЙ ЦИКЛ: выход из HOLD-сбора → рега → фарм ----------
+  // (подтверждение в AlertDialog внизу — кнопка затрагивает ВСЕ телефоны)
 
   const btn = (disabled: boolean) => disabled || !ok;
 
@@ -520,9 +528,30 @@ export function FunctionsPanel() {
               <Cookie className="h-4 w-4" />
               Проверка кук всем
             </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={!connected}
+              onClick={() => void serverAction("/api/farm/stop", "⏹ Стоп фарм всем")}
+            >
+              <Square className="h-4 w-4" />
+              Стоп фарм всем
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="border border-emerald-700 bg-emerald-600/15 text-emerald-400 hover:bg-emerald-600/25"
+              disabled={!connected}
+              onClick={() => setConfirmCycle(true)}
+            >
+              <RotateCcw className="h-4 w-4" />
+              НОВЫЙ ЦИКЛ
+            </Button>
             <p className="w-full text-xs text-muted-foreground">
-              Рега: farm ⏹ всем → 30с → rega.start. Сбор: 2 пачки по 20 мин (фармеры пополам) +
-              сборщики. Цели не учитывают селектор выше — это команды серверу.
+              Сбор сейчас = HOLD: фармеры зайдут в приватки с treid.lua и сидят там, пока не
+              нажмёшь «НОВЫЙ ЦИКЛ» — только он завершает сбор (снимает окно → фарм ⏹ → рега акков
+              → фарм сам поднимется с новыми акками). «Стоп фарм всем» = окно снято + фарм ⏹ на
+              всех (без рега). Кнопки — команды серверу, селектор цели не учитывается.
             </p>
           </CardContent>
         </Card>
@@ -534,7 +563,8 @@ export function FunctionsPanel() {
           <DialogHeader>
             <DialogTitle>🌾 Сбор урожая → {tgt}</DialogTitle>
             <DialogDescription>
-              Фарм зайдёт в приватки на время окна. Пустой place_id = свой PLACE_ID телефона.
+              Окно сбора на минутах (ручной режим). Для основного потока жми «Сбор сейчас» /
+              «НОВЫЙ ЦИКЛ» в блоке «Сервер — оркестрация» ниже: там сбор бессрочный (HOLD).
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">
@@ -638,6 +668,29 @@ export function FunctionsPanel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Подтверждение НОВОГО ЦИКЛА */}
+      <AlertDialog open={confirmCycle} onOpenChange={setConfirmCycle}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>🔁 НОВЫЙ ЦИКЛ — завершить сбор и регать акки?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Фармеры выйдут из приваток (окно сбора снято), фарм остановится, включится рега акков
+              (тумблер встанет в ВКЛ на сервере и телефонах). Когда рега закончит — фарм сам
+              запустится с новыми акками. Действие для ВСЕХ фармеров сразу.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+              onClick={() => void serverAction("/api/cycle/new", "🔁 НОВЫЙ ЦИКЛ")}
+            >
+              Запустить новый цикл
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Подтверждение Restart */}
       <AlertDialog open={confirmRestart} onOpenChange={setConfirmRestart}>

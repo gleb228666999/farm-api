@@ -34,13 +34,15 @@ export type PoolEntry = {
 
 export type PoolCounts = {
   pool: { total: number; free: number; busy: number };
-  archive: { total: number };
+  /** 🗑 v0.8: архив упразднён — сервер возвращает {total: 0} для совместимости */
+  archive?: { total: number };
 };
 
 export type PoolResponse = {
   counts: PoolCounts;
   pool: PoolEntry[];
-  archive: PoolEntry[];
+  /** 🗑 v0.8: архив упразднён — всегда [] */
+  archive?: PoolEntry[];
 };
 
 export type FarmEvent = {
@@ -61,9 +63,11 @@ export type FarmGroup = {
 export type ScheduleConfig = {
   enabled: boolean;
   rega_enabled: boolean;
-  rega_time: string;
+  /** 🆕 v0.8: авторега по расписанию удалена — поле осталось только для совместимости API */
+  rega_time?: string;
   harvest_time: string;
-  batch_minutes: number;
+  /** 🆕 v0.8: пачки упразднены (сбор = HOLD до «НОВЫЙ ЦИКЛ») — поле для совместимости API */
+  batch_minutes?: number;
   cookie_check_interval_min: number;
   rega_target: number;
   harvest_place_id: string;

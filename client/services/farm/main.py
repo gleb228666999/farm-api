@@ -138,6 +138,19 @@ v0.22 (🔥 ЛОКАЛЬНЫЕ КОДЫ ПРИВАТОК — фолбэк как
     кэш info/harvest_ids.txt → ЗАШИТЫЕ КОДЫ (привятки есть ВСЕГДА, ветки
     «запуск в обычный плейс» во время сбора больше НЕТ).
 - ✅ То же в сервисе collector (get_codes) — сборщик тоже не падает в плейс.
+
+v0.24 (🌾 СБОР = HOLD — сидим в приватках до кнопки «НОВЫЙ ЦИКЛ»):
+- ✅ ПО ПРОСЬБЕ ХОЗЯИНА («сделай пока что просто»): когда идёт сбор — фармеры
+    заходят на приватный сервер с нужным луа скриптом (treid.lua) и НЕ ВЫХОДЯТ,
+    пока хозяин в панели не нажмёт «НОВЫЙ ЦИКЛ». Только тогда сервер снимает
+    окно, гасит фарм, запускает регу акков — а рега по завершении сама ставит
+    фарм. Никаких «2 пачек по 20 мин» и авто-выхода из сбора.
+- ✅ harvest_window() теперь понимает hold: True (окно без срока, пишет клиент
+    v0.24 по команде сервера v0.8). run_harvest_session в HOLD-режиме мониторит
+    привятки БЕСКОНЕЧНО (до исчезновения окна): вылетевший клон возвращается
+    на свой сервер, байпас по кнопке работает как раньше.
+- ✅ Лог/события честно пишут «HOLD — до кнопки НОВЫЙ ЦИКЛ» вместо гигантских
+    минут.
 """
 import os
 import sys
@@ -494,18 +507,22 @@ def emit(etype, **info):
 # ==========================================
 # 🌾 СБОР УРОЖАЯ (окно пишет клиент, фарм читает)
 # ==========================================
-# Сервер в 20:00 МСК шлёт harvest.start → клиент пишет info/harvest_window.json
-# {until_ts, place_id}. Фарм в цикле/мониторинге видит окно → входит в приватки
-# на время окна (2 пачки × 20 мин задаёт сервер). harvest.stop → клиент удаляет файл.
+# Сервер шлёт harvest.start → клиент пишет info/harvest_window.json
+# {until_ts, place_id, hold}. Фарм в цикле/мониторинге видит окно → входит в
+# приватки: v0.24 HOLD — БЕССРОЧНО (до кнопки «НОВЫЙ ЦИКЛ» на панели, сервер
+# пришлёт harvest.stop). harvest.stop → клиент удаляет файл.
 
 def harvest_window():
-    """Активное окно сбора или None (нет/истекло/снято)."""
+    """Активное окно сбора или None (нет/истекло/снято).
+    🆕 v0.24: hold=True — окно БЕЗ СРОКА (HOLD): сидим в приватках с treid.lua,
+    пока сервер не пришлёт harvest.stop (кнопка «НОВЫЙ ЦИКЛ»)."""
     try:
         hw = json.loads(HARVEST_WINDOW_FILE.read_text())
         until = float(hw.get("until_ts") or 0)
         if time.time() >= until:
             return None
-        return {"until_ts": until, "place_id": str(hw.get("place_id") or "")}
+        return {"until_ts": until, "place_id": str(hw.get("place_id") or ""),
+                "hold": bool(hw.get("hold"))}
     except Exception:
         return None
 
@@ -975,6 +992,7 @@ def run_harvest_session(hw):
     в приватки впустую)."""
     until = float(hw.get("until_ts") or 0)
     place = hw.get("place_id") or PLACE_ID
+    hold = bool(hw.get("hold"))                # 🆕 v0.24: HOLD — бессрочно, до «НОВЫЙ ЦИКЛ»
     minutes = max(1, int((until - time.time()) // 60))
 
     treid = fetch_text(HARVEST_TREID_URL, TREID_CACHE_FILE)
@@ -1001,9 +1019,10 @@ def run_harvest_session(hw):
         emit("harvest.skip", reason="нет кук на клонах")
         return None
 
-    log(f"🌾 СБОР УРОЖАЯ (трейд): {minutes} мин · кук у клонов {with_sess}/{len(farm_pkgs_all)} "
+    log(f"🌾 СБОР УРОЖАЯ (трейд): {'HOLD — до кнопки «НОВЫЙ ЦИКЛ» (бессрочно)' if hold else f'{minutes} мин'}"
+        f" · кук у клонов {with_sess}/{len(farm_pkgs_all)} "
         f"· приваток {len(codes) or 'нет (плейс)'}")
-    emit("harvest.start", minutes=minutes, place=place,
+    emit("harvest.start", minutes=(0 if hold else minutes), hold=hold, place=place,
          codes=len(codes), clones=len(farm_pkgs_all))
 
     # 📝 автоэкзекют → treid.lua (после окна вернём фарм-скрипт в finally)
@@ -1031,10 +1050,10 @@ def run_harvest_session(hw):
         # 🆕 v0.18: возвращаем "bypass" — main() СЕЙЧАС съест флаг и сделает байпас,
         # потом сбор продолжится на остаток окна (окно ещё активно).
         emit("harvest.end", reason="bypass_requested",
-             minutes_left=max(0, int((until - time.time()) // 60)))
+             hold=hold, minutes_left=(0 if hold else max(0, int((until - time.time()) // 60))))
         log("🌾 Сбор прерван байпасом с дашборда — сейчас байпас, потом сбор продолжится")
         return "bypass"
-    emit("harvest.end")
+    emit("harvest.end", hold=hold)
     log("🌾 Сбор завершён — закрываю роблоксы, возвращаюсь к фарму")
 
 
@@ -1971,7 +1990,7 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + сбор-трейд v0.20 + приватки v0.22: зашитый фолбэк, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + сбор-трейд v0.24 HOLD «НОВЫЙ ЦИКЛ» + приватки v0.22: зашитый фолбэк, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")

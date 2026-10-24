@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.6
+🚜 Farm Server v0.8
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
 - /api/devices|send|broadcast|results|update
 - /api/events              события фарма из SQLite (этап 2)
 - /api/groups              группы устройств (этап 4) + send в группу
-- /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь/архив)
-- /api/schedule            ⏰ расписание: рега ежедневно + сбор по времени МСК (2 пачки)
--                          v0.6: фармеры = все онлайн-устройства кроме сборщиков (не только
--                          цифровые id); день помечается только при реальном старте;
--                          spawn_bg (GC не убивает задачи); валидация ЧЧ:ММ; честные ответы кнопок
+- /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
+- /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
 - /                        дашборд (dashboard.html)
+
+v0.8 — НОВЫЙ ЦИКЛ (по просьбе хозяина, «сделай пока что просто»):
+  • 🗑 АРХИВ УБРАН: отработанные куки УДАЛЯЮТСЯ, а не складываются в архив;
+    старые записи из архива возвращены в пул (миграция при старте);
+  • 🌾 СБОР = HOLD: harvest.start ставит окно БЕЗ СРОКА — фармеры заходят
+    в приватки с treid.lua и СИДЯТ там, пока хозяин не нажмёт «НОВЫЙ ЦИКЛ»;
+    никаких «2 пачек по 20 мин» и авто-выхода больше нет;
+  • 🔁 POST /api/cycle/new «НОВЫЙ ЦИКЛ» — ЕДИНСТВЕННЫЙ способ завершить цикл:
+    рега включается (тумблер ON на сервере и телефонах) → окно сбора снято →
+    фарм ⏹ → rega.start → рега сама поднимет фарм (ставится на фарм);
+  • ⏹ POST /api/farm/stop «Стоп фарм всем» — окно сбора снято + farm ⏹ на всех;
+  • 🆕 автрега по расписанию УДАЛЕНА: рега запускается ТОЛЬКО кнопкой
+    «НОВЫЙ ЦИКЛ» (или «Рега сейчас» при включённом тумблере).
 - v0.15: /api/devices/{id}/send, /api/broadcast, /api/groups/{name}/send —
           type:"task" ставится АВТОМАТИЧЕСКИ (клиент отвечает только на type=task)
-- v0.7: 🛡 БЕЗОПАСНЫЙ РЕЖИМ — kill-switch регы акков:
+- v0.7: 🛡 kill-switch регы акков (история):
     • rega_enabled=false в расписании (по умолчанию ВЫКЛЮЧЕНА — чтобы случайно
       не удалились/не перезаписались акки с лутом); кнопки «Рега сейчас» и
       расписание отказывают с объяснением;
@@ -85,6 +95,13 @@ DB_LOCK = threading.Lock()
 
 def init_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # 🗑 v0.8: архив упразднён — всё, что лежало в архиве, возвращаем в пул
+    try:
+        conn.execute("UPDATE pool SET status='pool', claimed_by=NULL, claimed_ts=NULL "
+                     "WHERE status='archive'")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS events(
         id        TEXT PRIMARY KEY,   -- id события от телефона (защита от дублей)
         device_id TEXT,
@@ -541,9 +558,9 @@ def db_pool_counts() -> dict:
         busy = DB.execute(
             "SELECT COUNT(*) FROM pool WHERE status='pool' AND claimed_by IS NOT NULL AND claimed_ts>?",
             (nowts - CLAIM_TTL,)).fetchone()[0]
-        arch_total = DB.execute("SELECT COUNT(*) FROM pool WHERE status='archive'").fetchone()[0]
+    # 🗑 v0.8: архива больше нет — только пул
     return {"pool": {"total": pool_total, "free": pool_total - busy, "busy": busy},
-            "archive": {"total": arch_total}}
+            "archive": {"total": 0}}
 
 
 def db_pool_entries(status: str, limit: int = 500) -> list:
@@ -582,12 +599,11 @@ def db_pool_claim(device_id: str, n: int, status: str = "pool") -> list:
 
 
 def db_pool_report(device_id: str, used: list, dead: list, released: list) -> dict:
-    """Отчёт телефона: used → в архив (можно поднять позже), dead → удалить,
-    released → снять бронь (не понадобились)."""
+    """Отчёт телефона: used → 🗑 v0.8 УДАЛЯЕМ (архива больше нет),
+    dead → удалить, released → снять бронь (не понадобились)."""
     with DB_LOCK:
         for c in used or []:
-            DB.execute("UPDATE pool SET status='archive', claimed_by=NULL, claimed_ts=NULL "
-                       "WHERE cookie=?", (c,))
+            DB.execute("DELETE FROM pool WHERE cookie=?", (c,))
         for c in dead or []:
             DB.execute("DELETE FROM pool WHERE cookie=?", (c,))
         for c in released or []:
@@ -609,13 +625,14 @@ def db_pool_delete(ids: list) -> int:
 
 
 def db_pool_move(ids: list, to: str) -> int:
-    if to not in ("pool", "archive"):
-        raise HTTPException(400, "to must be pool|archive")
+    # 🗑 v0.8: архива нет — переносить можно только в пул (снять бронь)
+    if to not in ("pool",):
+        raise HTTPException(400, "архив упразднён (v0.8): to must be 'pool'")
     with DB_LOCK:
         n = 0
         for i in ids:
-            DB.execute("UPDATE pool SET status=?, claimed_by=NULL, claimed_ts=NULL WHERE id=?",
-                       (to, int(i),))
+            DB.execute("UPDATE pool SET status='pool', claimed_by=NULL, claimed_ts=NULL WHERE id=?",
+                       (int(i),))
             n += DB.execute("SELECT changes()").fetchone()[0]
         DB.commit()
     return n
@@ -623,9 +640,10 @@ def db_pool_move(ids: list, to: str) -> int:
 
 @app.get("/api/pool")
 async def api_pool_get():
+    # 🗑 v0.8: архива больше нет — возвращаем только пул (archive: [] для совместимости)
     return {"counts": db_pool_counts(),
             "pool": db_pool_entries("pool"),
-            "archive": db_pool_entries("archive")}
+            "archive": []}
 
 
 @app.post("/api/pool/add")
@@ -633,8 +651,8 @@ async def api_pool_add(body: dict):
     entries = parse_pool_text(body.get("text") or "")
     if not entries:
         raise HTTPException(400, "куки не распознаны (нужно nick:/pass:/.ROBLOSECURITY=... или токены построчно)")
-    status = "archive" if body.get("to") == "archive" else "pool"
-    added = db_pool_add(entries, status=status, source=body.get("source") or "dashboard")
+    # 🗑 v0.8: параметр to=archive игнорируется — добавляем всегда в пул
+    added = db_pool_add(entries, status="pool", source=body.get("source") or "dashboard")
     return {"ok": True, "added": added, "counts": db_pool_counts()}
 
 
@@ -656,12 +674,13 @@ async def api_pool_move(body: dict):
 
 @app.post("/api/pool/claim")
 async def api_pool_claim(body: dict):
-    """Телефон бронирует куки: {"device_id","n","from":"pool"|"archive"}"""
+    """Телефон бронирует куки: {"device_id","n","from":"pool"}
+    🗑 v0.8: from=archive больше не даёт кук — архива нет."""
     did = str(body.get("device_id") or "")
     n = min(max(int(body.get("n") or 0), 0), 50)
     if not did or n <= 0:
         raise HTTPException(400, "need device_id and n")
-    status = "archive" if body.get("from") == "archive" else "pool"
+    status = "pool"
     got = db_pool_claim(did, n, status=status)
     log(f"[🍪] {did}: claim {len(got)}/{n} из {status}")
     return {"ok": True, "got": got, "counts": db_pool_counts()}
@@ -818,19 +837,64 @@ async def orchestrate_rega():
     return {"sent": sent}
 
 
-_HARVEST_RUNNING = False   # 🌾 v0.7: True пока идёт harvest_flow (cookie.check ждёт)
+_HARVEST_RUNNING = False   # 🌾 v0.8: True пока фармеры сидят в приватках (HOLD до «НОВЫЙ ЦИКЛ»)
+
+
+async def orchestrate_new_cycle() -> dict:
+    """🔁 НОВЫЙ ЦИКЛ (v0.8) — единственный способ завершить HOLD-сбор:
+    1) окно сбора снято у ВСЕХ (фармеры выходят из приваток ≤30-40с,
+       закрывают роблоксы, возвращают фарм-скрипт в автоэкзекют;
+       сборщики выходят из окна и ждут);
+    2) ждём 45с — фарм успевает выйти из сессии сбора;
+    3) farm ⏹ у фармеров (чистый старт для регы);
+    4) ждём 30с;
+    5) rega.start — рега по завершении САМА поднимет фарм (watchdog),
+       т.е. «ставится на фарм» с новыми акками.
+    Кил-свитч регы ПЕРЕД этим включается сервером (/api/cycle/new шлёт
+    rega.switch enabled=true) — явное нажатие кнопки хозяина = явное
+    разрешение на регистрацию, поэтому отдельного force у телефона не нужно."""
+    farmers = farmers_online()
+    collectors = collectors_online()
+    if not farmers:
+        log("[🔁] НОВЫЙ ЦИКЛ: нет онлайн-фармеров — некому регать/фармить")
+        return {"sent": [], "note": "нет онлайн-фармеров"}
+    st = load_sched_state()
+    st["rega_pending"] = farmers
+    st["rega_started"] = now()
+    st["last_rega"] = datetime.now(MSK).strftime("%Y-%m-%d")
+    save_sched_state(st)
+    log(f"[🔁] НОВЫЙ ЦИКЛ шаг 1/4: снимаю окно сбора у {len(farmers) + len(collectors)} устройств")
+    for did in collectors + farmers:
+        await send_task(did, "harvest.stop", {})
+    global _HARVEST_RUNNING
+    _HARVEST_RUNNING = False
+    await asyncio.sleep(45)                    # фарм выходит из сессии сбора (≤40с мониторинг)
+    log(f"[🔁] НОВЫЙ ЦИКЛ шаг 2/4: farm ⏹ на {len(farmers)}: {', '.join(farmers)}")
+    for did in farmers:
+        await send_task(did, "service.stop", {"name": "farm"})
+    await asyncio.sleep(30)                    # фарм успевает остановиться и закрыть роблоксы
+    cfg = load_schedule()
+    sent = []
+    for did in farmers:
+        tid = await send_task(did, "rega.start", {"target": cfg.get("rega_target", 5)})
+        if tid:
+            sent.append(did)
+    log(f"[🔁] НОВЫЙ ЦИКЛ шаг 3/4: рега запущена на {len(sent)}: {', '.join(sent)} — "
+        f"по завершении рега сама поднимет фарм (шаг 4/4)")
+    return {"sent": sent}
 
 
 async def harvest_flow() -> bool:
-    """🌾 Сбор урожая v2 (безопасный трейд): сборщики на всё окно (40 мин +
-    90с head-start на байпас/выход в приватки), фармеры 2 пачками по 20 мин.
-    День (last_harvest) помечается ТОЛЬКО если запуск реально начался.
-    🛡 Сборщики — ОТДЕЛЬНЫЕ телефоны collector-* (сервис collector, скрипт
-    bank.py): их акки принимают трейды. Если сборщиков нет — сбор всё равно
-    идёт: фармеры зайдут в приватки, treid.lua сам будет ждать цели — ЛУТ НЕ ТЕРЯЕТСЯ."""
+    """🌾 СБОР УРОЖАЯ v3 — HOLD-РЕЖИМ (v0.8, «сделай пока что просто»):
+    всем фармерам и сборщикам ставится окно сбора БЕЗ СРОКА (hold):
+    они заходят в приватки с treid.lua/collet.lua и СИДЯТ там (вылетевший
+    клон возвращается в СВОЮ приватку), пока хозяин не нажмёт «НОВЫЙ ЦИКЛ»
+    (/api/cycle/new) или «Сбор стоп». Никаких пачек и авто-выхода.
+    Фарм, который был остановлен («Стоп фарм всем»), поднимается сам —
+    иначе некому прочитать окно. День (last_harvest) помечается при
+    реальном старте — «впустую» клик день не сжигает."""
     global _HARVEST_RUNNING
     cfg = load_schedule()
-    mins = max(1, int(cfg.get("batch_minutes", 20)))
     place = cfg.get("harvest_place_id") or ""
     farmers = farmers_online()
     collectors = collectors_online()
@@ -840,34 +904,14 @@ async def harvest_flow() -> bool:
     st = load_sched_state()
     st["last_harvest"] = datetime.now(MSK).strftime("%Y-%m-%d")
     save_sched_state(st)
-    mid = (len(farmers) + 1) // 2               # нечётное число → лишний в пачке 1 (старт сразу)
-    b1, b2 = farmers[:mid], farmers[mid:]
-    log(f"[🌾] Сбор {mins}+{mins} мин: пачка1={b1 or '—'} | пачка2={b2 or '—'} | сборщики={collectors}")
-    if not collectors:
-        log("[🌾] ⚠️ Сборщиков (collector-*) нет онлайн — фармеры всё равно выйдут в приватки, "
-            "трейд будет ждать целей (безопасно, лут остаётся у фармеров)")
     _HARVEST_RUNNING = True
-    try:
-        for did in collectors:
-            # +2 мин запаса: окно сборщика покрывает head-start + обе пачки
-            await send_task(did, "harvest.start", {"minutes": mins * 2 + 2, "place_id": place})
-        if collectors:
-            log("[🌾] Сборщикам 90с head-start (байпас + выход в приватки) — потом пачка 1")
-            await asyncio.sleep(90)
-        for did in b1:
-            await send_task(did, "harvest.start", {"minutes": mins, "place_id": place})
-        await asyncio.sleep(mins * 60)
-        log("[🌾] Сбор: пачка 2")
-        for did in b2:
-            await send_task(did, "harvest.start", {"minutes": mins, "place_id": place})
-        await asyncio.sleep(mins * 60)
-        for did in collectors:
-            await send_task(did, "harvest.stop", {})
-        for did in farmers:
-            await send_task(did, "harvest.stop", {})
-        log("[🌾] Сбор завершён — фарм продолжает обычный цикл")
-    finally:
-        _HARVEST_RUNNING = False
+    log(f"[🌾] СБОР (HOLD — до кнопки «НОВЫЙ ЦИКЛ»): фармеры={farmers} | сборщики={collectors}")
+    # 1) окно сбора (hold) — клиент пишет info/harvest_window.json без срока
+    for did in collectors + farmers:
+        await send_task(did, "harvest.start", {"hold": True, "minutes": 0, "place_id": place})
+    # 2) фарм должен ЖИТЬ, чтобы увидеть окно (PM.start идемпотентен: «already running» — норм)
+    for did in farmers:
+        await send_task(did, "service.start", {"name": "farm"})
     return True
 
 
@@ -897,7 +941,7 @@ def _within_catchup(now_msk: datetime, hhmm: str) -> bool:
 
 
 async def schedule_loop():
-    log("[⏰] Планировщик запущен (рега/сбор/проверка кук, время МСК)")
+    log("[⏰] Планировщик запущен (сбор HOLD/проверка кук, время МСК; рега — ТОЛЬКО по «НОВЫЙ ЦИКЛ»)")
     while True:
         try:
             cfg = load_schedule()
@@ -916,22 +960,19 @@ async def schedule_loop():
                     st2["rega_pending"] = []
                     save_sched_state(st2)
 
-                # 🛡 v0.7: рега работает ТОЛЬКО при rega_enabled=true (тумблер на дашборде)
-                if (cfg.get("rega_enabled", False)
-                        and _hhmm_passed(now_msk, cfg.get("rega_time", "03:00"))
-                        and _within_catchup(now_msk, cfg.get("rega_time", "03:00"))
-                        and st.get("last_rega") != today
-                        and not st.get("rega_pending")):
-                    spawn_bg(orchestrate_rega())
+                # 🆕 v0.8: АВТОРЕГА ПО РАСПИСАНИЮ УДАЛЕНА — рега запускается
+                # ТОЛЬКО кнопкой «НОВЫЙ ЦИКЛ» (/api/cycle/new) или «Рега сейчас».
 
                 if (_hhmm_passed(now_msk, cfg.get("harvest_time", "20:00"))
                         and _within_catchup(now_msk, cfg.get("harvest_time", "20:00"))
-                        and st.get("last_harvest") != today):
+                        and st.get("last_harvest") != today
+                        and not _HARVEST_RUNNING):
                     spawn_bg(harvest_flow())
 
                 if not st.get("rega_pending") and not _HARVEST_RUNNING:
-                    # 🛡 v0.7: во время активного сбора проверку кук НЕ шлём —
-                    # check перезапускает клоны и мешает трейду
+                    # 🛡 во время HOLD-сбора проверку кук НЕ шлём (клиент и сам
+                    # откажет — окно сбора активно); check перезапускает клоны
+                    # и срывает трейд
                     interval_min = max(5, int(cfg.get("cookie_check_interval_min", 30)))
                     if now() - st.get("last_check", 0) >= interval_min * 60:
                         st["last_check"] = now()
@@ -1034,8 +1075,10 @@ async def api_rega_switch(body: dict):
 
 @app.post("/api/harvest/start")
 async def api_harvest_now():
-    """Кнопка «Сбор сейчас» — вне расписания. last_harvest ставит сам
-    harvest_flow при реальном старте — клик «впустую» не сжигает день"""
+    """Кнопка «Сбор сейчас» — вне расписания. HOLD-режим: фармеры зайдут в
+    приватки с treid.lua и будут сидеть там до кнопки «НОВЫЙ ЦИКЛ».
+    last_harvest ставит сам harvest_flow при реальном старте — клик
+    «впустую» не сжигает день"""
     farmers = farmers_online()
     collectors = collectors_online()
     if not farmers and not collectors:
@@ -1045,7 +1088,62 @@ async def api_harvest_now():
                 "note": "нет онлайн-устройств — некому запускать сбор"}
     spawn_bg(harvest_flow())
     return {"ok": True, "farmers": farmers, "collectors": collectors,
-            "note": "сбор запускается (2 пачки)"}
+            "note": "сбор запущен (HOLD): фармеры в приватках с treid.lua до кнопки «НОВЫЙ ЦИКЛ»"}
+
+
+@app.post("/api/cycle/new")
+async def api_cycle_new():
+    """🔁 НОВЫЙ ЦИКЛ (v0.8): единственный выход из HOLD-сбора.
+    1) включаем регу (тумблер ON: сервер + все онлайн-телефоны — явное
+       действие хозяина = явное разрешение реге);
+    2) фон: окно сбора снято → 45с → farm ⏹ → 30с → rega.start;
+       рега по завершении сама поднимет фарм (ставится на фарм)."""
+    farmers = farmers_online()
+    if not farmers:
+        log("[🔁] НОВЫЙ ЦИКЛ: нет онлайн-фармеров")
+        return {"ok": False, "farmers": [], "farmers_total": farmers_total(),
+                "note": "нет онлайн-фармеров — некому запускать новый цикл"}
+    # 1) кил-свитч регы → ON (сервер + телефоны). Это НЕ «тихая авторега»:
+    #    хозяин сам нажал «НОВЫЙ ЦИКЛ».
+    cfg = load_schedule()
+    cfg["rega_enabled"] = True
+    save_schedule(cfg)
+    sent_sw = []
+    for did in list(devices.keys()):
+        if did.startswith("anon_") or not device_online(did):
+            continue
+        if await send_task(did, "rega.switch", {"enabled": True,
+                                                "source": "cycle.new"}):
+            sent_sw.append(did)
+    log(f"[🔁] НОВЫЙ ЦИКЛ: рега включена (rega.switch → {sent_sw or '—'}); запускаю оркестрацию")
+    spawn_bg(orchestrate_new_cycle())
+    return {"ok": True, "farmers": farmers, "rega_switch_sent": sent_sw,
+            "note": "НОВЫЙ ЦИКЛ: окно сбора снято → farm ⏹ → рега → фарм сам поднимется "
+                    "с новыми акками"}
+
+
+@app.post("/api/farm/stop")
+async def api_farm_stop_all():
+    """⏹ СТОП ФАРМ ВСЕМ (v0.8): раньше кнопки не было на сервере, а широковещательный
+    «Фарм ⏹» из панели оставлял живое окно сбора — при следующем старте фарм
+    возвращался в сбор и казалось, что «стоп не работает». Теперь: окно сбора
+    снято у всех + farm ⏹ у всех (SIGTERM фарма закрывает роблоксы)."""
+    targets = [did for did in devices
+               if device_online(did) and not did.startswith("anon_")]
+    if not targets:
+        return {"ok": False, "sent": [],
+                "note": "нет онлайн-устройств"}
+    sent = []
+    for did in targets:
+        ok1 = await send_task(did, "harvest.stop", {})   # окно сбора снять (не вернётся в сбор)
+        ok2 = await send_task(did, "service.stop", {"name": "farm"})
+        if ok1 or ok2:
+            sent.append(did)
+    global _HARVEST_RUNNING
+    _HARVEST_RUNNING = False
+    log(f"[⏹] СТОП ФАРМ ВСЕМ: окно сбора снято + farm ⏹ → {sent}")
+    return {"ok": True, "sent": sent,
+            "note": "фарм остановлен на всех, окно сбора снято (роблоксы закрыты)"}
 
 
 @app.post("/api/cookie/check")

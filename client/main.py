@@ -94,6 +94,13 @@
           окна фарм-скрипт восстанавливается; новый сервис collector (порт из
           bank.py хозяина): автоэкзекют = collet.lua (авто-приём трейдов),
           полный байпас v18.8, те же приватки из id.txt
+- v0.24: 🌾 СБОР = HOLD (под сервер v0.8 «НОВЫЙ ЦИКЛ»): harvest.start с
+        {"hold": true} пишет окно сбора БЕЗ СРОКА (until_ts = +30 дней) —
+        фармеры/сборщики сидят в приватках с treid.lua/collet.lua, пока
+        хозяин в панели не нажмёт «НОВЫЙ ЦИКЛ» (придёт harvest.stop → окно
+        снято → фарм выйдет из сбора → сервер запустит регу → рега поднимет
+        фарм). Раньше окно жило максимум 180 мин и фарм сам возвращался
+        из сбора, ломая цикл хозяина.
 """
 import sys
 import os
@@ -121,7 +128,8 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.20"
+VERSION = "0.24"
+HARVEST_HOLD_MINUTES = 30 * 24 * 60      # 🌾 v0.24: «бессрочное» окно сбора (30 дней) — снимается только harvest.stop
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -394,15 +402,28 @@ def _stop_service(payload: dict) -> dict:
 # ---------- 🌾 СБОР УРОЖАЯ: окно для фарма (клиент пишет, фарм читает) ----------
 
 def task_harvest_start(payload: dict) -> dict:
-    minutes = max(1, min(int(payload.get("minutes") or 20), 180))
+    """🌾 v0.24: HOLD-режим — окно сбора БЕЗ СРОКА. Сервер (v0.8) шлёт
+    {"hold": true, "minutes": 0}: фармеры/сборщики заходят в приватки
+    с treid.lua/collet.lua и сидят там, пока хозяин не нажмёт «НОВЫЙ ЦИКЛ»
+    (придёт harvest.stop и файл окна удалится) — раньше окно было максимум
+    на 180 мин и фарм сам возвращался из сбора, ломая цикл хозяина.
+    Обычный режим с минутами тоже оставлен (совместимость)."""
+    hold = bool(payload.get("hold")) or not str(payload.get("minutes") or "").strip() \
+        or int(payload.get("minutes") or 0) <= 0
+    if hold:
+        minutes = HARVEST_HOLD_MINUTES          # 30 дней — «бессрочно» до НОВОГО ЦИКЛА
+    else:
+        minutes = max(1, min(int(payload.get("minutes") or 20), 180))
     data = {"until_ts": round(time.time() + minutes * 60, 1),
             "place_id": str(payload.get("place_id") or ""),
-            "set_ts": round(time.time(), 1)}
+            "set_ts": round(time.time(), 1),
+            "hold": hold}
     f = BASE / "info" / "harvest_window.json"
     tmp = f.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))
     tmp.replace(f)                                   # атомарно
-    log(f"🌾 Окно сбора: {minutes} мин (until {data['until_ts']})")
+    log(f"🌾 Окно сбора: {'БЕССРОЧНО (HOLD — до кнопки «НОВЫЙ ЦИКЛ»)' if hold else f'{minutes} мин'} "
+        f"(until {data['until_ts']})")
     return {"ok": True, **data}
 
 
@@ -412,7 +433,7 @@ def task_harvest_stop(payload: dict) -> dict:
         f.unlink()
     except FileNotFoundError:
         pass
-    log("🌾 Окно сбора снято")
+    log("🌾 Окно сбора снято (HOLD завершён — ждём «НОВЫЙ ЦИКЛ»/регу)")
     return {"ok": True, "note": "фарм вернётся к обычному циклу ≤30с"}
 
 

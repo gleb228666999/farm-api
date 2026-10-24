@@ -136,7 +136,7 @@ function ScheduleInner() {
                 <p className="text-[11px] text-muted-foreground">
                   {cfg.rega_enabled
                     ? "ВКЛЮЧЕНА — телефоны могут регистрировать и заменять акки"
-                    : "ВЫКЛЮЧЕНА (безопасный режим) — акки с лутом защищены"}
+                    : "ВЫКЛЮЧЕНА (безопасный режим) — акки с лутом защищены. Кнопка «🔁 НОВЫЙ ЦИКЛ» включит её сама на время цикла"}
                 </p>
               </div>
               <Switch
@@ -146,14 +146,11 @@ function ScheduleInner() {
                 onCheckedChange={(v) => void toggleRega(v)}
               />
             </div>
-          </div>
-          <div className="grid gap-1.5">
-            <Label className="text-xs">🆕 Рега ежедневно (ЧЧ:ММ)</Label>
-            <Input
-              value={cfg.rega_time}
-              onChange={(e) => setCfg({ ...cfg, rega_time: e.target.value })}
-              placeholder="03:00"
-            />
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              🆕 Рега запускается ТОЛЬКО кнопкой «🔁 НОВЫЙ ЦИКЛ» (Функции → Сервер — оркестрация):
+              сбор завершается → рега → фарм сам встаёт с новыми акками. По расписанию рега больше
+              не запускается.
+            </p>
           </div>
           <div className="grid gap-1.5">
             <Label className="text-xs">🌾 Сбор урожая (ЧЧ:ММ)</Label>
@@ -161,16 +158,6 @@ function ScheduleInner() {
               value={cfg.harvest_time}
               onChange={(e) => setCfg({ ...cfg, harvest_time: e.target.value })}
               placeholder="20:00"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label className="text-xs">Пачка сбора (минут)</Label>
-            <Input
-              value={String(cfg.batch_minutes)}
-              onChange={(e) =>
-                setCfg({ ...cfg, batch_minutes: parseInt(e.target.value, 10) || 20 })
-              }
-              inputMode="numeric"
             />
           </div>
           <div className="grid gap-1.5">
