@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.10
+🚜 Farm Server v0.11
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
@@ -9,8 +9,22 @@
 - /api/groups              группы устройств (этап 4) + send в группу
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
 - /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
+- /api/pending             ⏳ отложенные команды (посмотреть/снять)
 - /                        дашборд (dashboard.html)
 
+v0.11 — «СТОП ФАРМ ВСЕМ НЕ РАБОТАЕТ / КНОПКИ ДЛЯ ВСЕХ НИЧЕГО НЕ ДЕЛАЮТ» (хозяин):
+  • ⏳ ГЛАВНОЕ: команды «для всех» (Стоп фарм всем, тумблер регы) уходили ТОЛЬКО
+    онлайн-телефонам. Если телефоны спали/офлайн — команда терялась НАВСЕГДА:
+    фарм продолжал крутиться, рега — регистрировать. Теперь критические команды
+    ОТКЛАДЫВАЮТСЯ (pending_commands.json, TTL 12ч) и вручаются телефону при
+    следующем hello — «Стоп фарм всем» ДОГОНЯЕТ даже спящий телефон.
+  • ⏳ известные device_id сохраняются (known_devices.json) — переживает рестарт
+    сервера; в /api/devices офлайн-известные телефоны видны с пометкой pending;
+  • ⏳ «Сбор сейчас» / «НОВЫЙ ЦИКЛ» / «Рега сейчас» снимают отложенные стопы —
+    новое намерение хозяина важнее старого; в панели кнопка «Снять отложенные»;
+  • 📡 честный broadcast: в ответе delivered/stale — видно, чья связь уже тухлая;
+  • 📡 sender-фикс: мёртвый сокет при отправке ЧЕСТНО убирается из devices
+    (раньше задачи молча утекали в пустоту с ответом «sent=N»).
 v0.10 — ПАНЕЛЬ ЛАГАЛА / КНОПКИ «НЕ РАБОТАЮТ» (жалоба хозяина):
   • /client/manifest СИНХРОННО хешировал ВСЕ файлы клиента (включая info/ и
     logs/) прямо в event loop — на время хеширования СЕРВЕР НЕ ОТВЕЧАЛ НИ НА
@@ -84,6 +98,106 @@ def spawn_bg(coro) -> asyncio.Task:
     _BG_TASKS.add(t)
     t.add_done_callback(_BG_TASKS.discard)
     return t
+
+
+# ---------- ⏳ ОТЛОЖЕННЫЕ КРИТИЧЕСКИЕ КОМАНДЫ (v0.11) ----------
+# ЖАЛОБА ХОЗЯИНА: «нажал Стоп фарм всем — ничего не происходит». Причина:
+# телефоны в этот момент спали/были офлайн — команда уходит только онлайн,
+# офлайн-телефон получит её НИКОГДА (фарм продолжит крутиться).
+# Теперь критические команды (стоп фарма, окно сбора снять, рега-switch)
+# ставятся в персистентную очередь и ВРУЧАЮТСЯ телефону при следующем hello.
+# «Сбор сейчас» / «НОВЫЙ ЦИКЛ» / «Рега сейчас» снимают отложенные стопы —
+# новое намерение хозяина всегда важнее старого.
+
+PENDING_FILE = BASE_DIR / "pending_commands.json"
+KNOWN_DEVICES_FILE = BASE_DIR / "known_devices.json"
+PENDING_TTL = 12 * 3600          # отложенная команда живёт 12ч
+PENDING_LOCK = threading.Lock()
+
+
+def load_json_file(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default
+
+
+def save_json_file(path: Path, data):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False))
+    tmp.replace(path)
+
+
+def remember_device(did: str):
+    """Известные device_id (переживает рестарт сервера) — по ним откладываем
+    команды для офлайн-телефонов."""
+    if not did or did.startswith("anon_"):
+        return
+    with PENDING_LOCK:
+        known = load_json_file(KNOWN_DEVICES_FILE, [])
+        if did not in known:
+            known.append(did)
+            save_json_file(KNOWN_DEVICES_FILE, known[-300:])
+
+
+def known_devices() -> list:
+    return load_json_file(KNOWN_DEVICES_FILE, [])
+
+
+def queue_pending(dids: list, task: str, payload: dict):
+    """Отложить команду для устройств, которые сейчас офлайн."""
+    with PENDING_LOCK:
+        pend = load_json_file(PENDING_FILE, {})
+        cut = now() - PENDING_TTL
+        for did in dids:
+            lst = [e for e in pend.get(did, []) if e.get("ts", 0) > cut]
+            lst.append({"task": task, "payload": payload or {}, "ts": now()})
+            pend[did] = lst
+        save_json_file(PENDING_FILE, pend)
+
+
+def pop_pending(did: str) -> list:
+    """Забрать все отложенные команды устройства (при hello)."""
+    with PENDING_LOCK:
+        pend = load_json_file(PENDING_FILE, {})
+        out = pend.pop(did, [])
+        if out:
+            save_json_file(PENDING_FILE, pend)
+    return [e for e in out if e.get("ts", 0) > now() - PENDING_TTL]
+
+
+def clear_pending(task_names: set | None = None):
+    """Снять отложенные команды (полностью или по типу) — при новом
+    намерении хозяина (Сбор/Новый цикл/Рега)."""
+    with PENDING_LOCK:
+        pend = load_json_file(PENDING_FILE, {})
+        if not pend or task_names is None:
+            if pend:
+                save_json_file(PENDING_FILE, {})
+            return
+        changed = False
+        for did in list(pend):
+            kept = [e for e in pend[did] if e.get("task") not in task_names]
+            if len(kept) != len(pend[did]):
+                changed = True
+            if kept:
+                pend[did] = kept
+            else:
+                pend.pop(did)
+        if changed:
+            save_json_file(PENDING_FILE, pend)
+
+
+def pending_summary() -> dict:
+    """Сколько у каждого устройства отложенных команд (для панели)."""
+    pend = load_json_file(PENDING_FILE, {})
+    cut = now() - PENDING_TTL
+    out = {}
+    for did, lst in pend.items():
+        live = [e for e in lst if e.get("ts", 0) > cut]
+        if live:
+            out[did] = [e.get("task") for e in live]
+    return out
 
 
 # ---------- SQLite (этапы 2+4) ----------
@@ -254,9 +368,18 @@ async def ws_endpoint(ws: WebSocket):
     sender_task = None
 
     async def sender():
-        while True:
-            msg = await queue.get()
-            await ws.send_text(json.dumps(msg))
+        # 🆑 v0.11: мёртвый сокет больше не «проглатывает» задачи молча —
+        # при ошибке отправки устройство ЧЕСТНО убирается из devices,
+        # чтобы «команды для всех» не улетали в пустоту с ответом «sent=N»
+        try:
+            while True:
+                msg = await queue.get()
+                await ws.send_text(json.dumps(msg))
+        except Exception:
+            cur = devices.get(device_id or "")
+            if cur and cur.get("queue") is queue:
+                devices.pop(device_id, None)
+                log(f"[-] {device_id}: сокет мёртв при отправке → удалён из devices")
 
     try:
         while True:
@@ -275,10 +398,25 @@ async def ws_endpoint(ws: WebSocket):
                     "client_version": msg.get("client_version"),
                     "last_seen": now(), "connected_at": now(),
                 }
+                remember_device(device_id)   # ⏳ v0.11: знаем id даже после рестарта сервера
                 if sender_task is None:
                     sender_task = asyncio.create_task(sender())
                 log(f"[+] {device_id} connected ({len(devices)} online)")
                 await queue.put({"type": "welcome", "server_time": now(), "online": len(devices)})
+                # ⏳ v0.11: вручаем отложенные команды («Стоп фарм всем», нажатый,
+                # пока телефон был офлайн/спал — теперь он НЕ потерян навсегда)
+                try:
+                    pend = pop_pending(device_id)
+                    for cmd in pend:
+                        await queue.put({
+                            "type": "task", "task": cmd.get("task"),
+                            "payload": cmd.get("payload") or {},
+                            "task_id": f"pend_{secrets.token_hex(3)}"})
+                    if pend:
+                        log(f"[⏳] {device_id}: вручены отложенные команды: "
+                            f"{[c.get('task') for c in pend]}")
+                except Exception as e:
+                    log(f"[!] pending deliver {device_id}: {e}")
                 # 🛡 v0.7: синхронизация kill-switch регы при каждом коннекте —
                 # телефон, который был офлайн во время переключения тумблера,
                 # догоняет состояние сам (пишет info/rega_switch.json)
@@ -349,6 +487,7 @@ async def ws_endpoint(ws: WebSocket):
 @app.get("/api/devices")
 async def api_devices():
     gmap = db_group_map()
+    pend = pending_summary()   # ⏳ v0.11: какие команды ждут офлайн-телефоны
     out = []
     for did, d in devices.items():
         out.append({
@@ -359,8 +498,33 @@ async def api_devices():
             "info": d.get("info", {}),
             "uptime_sec": int(now() - d["connected_at"]),
             "groups": gmap.get(did, []),
+            "pending": pend.get(did, []),
         })
-    return {"count": len(out), "devices": out}
+    known = known_devices()
+    for did in known:          # офлайн-известные — с их отложенными командами
+        if did in devices:
+            continue
+        out.append({
+            "device_id": did, "online": False, "last_seen_sec": None,
+            "client_version": None, "info": {}, "uptime_sec": None,
+            "groups": gmap.get(did, []), "pending": pend.get(did, []),
+        })
+    return {"count": len(out), "devices": out,
+            "pending_total": sum(len(v) for v in pend.values())}
+
+
+@app.get("/api/pending")
+async def api_pending_get():
+    """⏳ v0.11: какие критические команды ждут офлайн-телефоны."""
+    return {"pending": pending_summary(), "known_devices": known_devices()}
+
+
+@app.delete("/api/pending")
+async def api_pending_clear():
+    """⏳ кнопка «Снять отложенные команды» — если хозяин передумал."""
+    clear_pending(None)
+    log("[⏳] Отложенные команды сняты (кнопка панели)")
+    return {"ok": True, "note": "отложенные команды сняты"}
 
 
 @app.post("/api/devices/{device_id}/send")
@@ -378,7 +542,10 @@ async def api_send(device_id: str, body: dict):
 
 @app.post("/api/broadcast")
 async def api_broadcast(body: dict):
-    sent = []
+    """🆑 v0.11 честный broadcast: задача уходит ВСЕМ записям в devices,
+    но в ответе видно, кому реально доставлено (онлайн), а чья связь уже
+    тухлая (stale >90с без heartbeat — вероятно, задача не дойдёт)."""
+    sent, stale = [], []
     for did, d in list(devices.items()):
         task_id = f"t_{secrets.token_hex(4)}"
         msg = dict(body)
@@ -387,7 +554,11 @@ async def api_broadcast(body: dict):
         await d["queue"].put(msg)
         remember_result(task_id, "sent", did)
         sent.append(task_id)
-    return {"sent": len(sent), "task_ids": sent}
+        if not device_online(did):
+            stale.append(did)
+    return {"sent": len(sent), "task_ids": sent,
+            "delivered": [did for did in devices if did not in stale],
+            "stale": stale}
 
 
 @app.get("/api/results/{task_id}")
@@ -1065,6 +1236,7 @@ async def api_rega_now():
         log("[🆕] Рега сейчас: нет онлайн-фармеров")
         return {"ok": False, "farmers": [], "farmers_total": farmers_total(),
                 "note": "нет онлайн-фармеров — некому запускать регу"}
+    clear_pending({"harvest.stop", "service.stop farm"})   # ⏳ новое намерение важнее старого стопа
     spawn_bg(orchestrate_rega())
     return {"ok": True, "farmers": farmers,
             "note": "рега запускается (farm ⏹ → 30с → rega.start)"}
@@ -1086,13 +1258,27 @@ async def api_rega_switch(body: dict):
             continue
         if await send_task(did, "rega.switch", {"enabled": enabled}):
             sent.append(did)
+    # ⏳ v0.11: офлайн/полуживые телефоны НЕ узнают о тумблере до hello — откладываем,
+    # иначе «выключил регу, а телефон, включившийся позже, продолжит регать»
+    online_set = set(sent)
+    offline = [did for did in known_devices()
+               if did not in online_set and did not in devices]
+    offline += [did for did in devices
+                if did not in online_set and not did.startswith("anon_")]
+    offline = sorted(set(offline))
+    if offline:
+        queue_pending(offline, "rega.switch", {"enabled": enabled,
+                                               "source": "deferred-switch"})
     log(f"[🛡] Рега акков {'ВКЛЮЧЕНА' if enabled else 'ОТКЛЮЧЕНА (безопасный режим)'} "
-        f"— rega.switch отправлен: {sent or '—'} (офлайн догонят при hello)")
-    return {"ok": True, "rega_enabled": enabled, "sent": sent,
-            "note": ("рега ВКЛЮЧЕНА — телефоны снова регистрируют акки"
-                     if enabled else
-                     "🛡 рега ОТКЛЮЧЕНА — авторегистрация и замена кук остановлены, "
-                     "акки с лутом защищены")}
+        f"— rega.switch отправлен: {sent or '—'}; отложен для офлайн: {offline or '—'}")
+    note = ("рега ВКЛЮЧЕНА — телефоны снова регистрируют акки"
+            if enabled else
+            "🛡 рега ОТКЛЮЧЕНА — авторегистрация и замена кук остановлены, "
+            "акки с лутом защищены")
+    if offline:
+        note += f"; ⏳ офлайн-телефоны ({len(offline)}) получат состояние при подключении"
+    return {"ok": True, "rega_enabled": enabled, "sent": sent, "queued": offline,
+            "note": note}
 
 
 @app.post("/api/harvest/start")
@@ -1108,6 +1294,7 @@ async def api_harvest_now():
         return {"ok": False, "farmers": [], "collectors": [],
                 "farmers_total": farmers_total(), "collectors_total": collectors_total(),
                 "note": "нет онлайн-устройств — некому запускать сбор"}
+    clear_pending({"harvest.stop", "service.stop farm"})   # ⏳ сбор стартует — старые стопы не нужны
     spawn_bg(harvest_flow())
     return {"ok": True, "farmers": farmers, "collectors": collectors,
             "note": "сбор запущен (HOLD): фармеры в приватках с treid.lua до кнопки «НОВЫЙ ЦИКЛ»"}
@@ -1127,6 +1314,7 @@ async def api_cycle_new():
                 "note": "нет онлайн-фармеров — некому запускать новый цикл"}
     # 1) кил-свитч регы → ON (сервер + телефоны). Это НЕ «тихая авторега»:
     #    хозяин сам нажал «НОВЫЙ ЦИКЛ».
+    clear_pending({"harvest.stop", "service.stop farm"})   # ⏳ новый цикл — старые стопы отменяются
     cfg = load_schedule()
     cfg["rega_enabled"] = True
     save_schedule(cfg)
@@ -1146,15 +1334,13 @@ async def api_cycle_new():
 
 @app.post("/api/farm/stop")
 async def api_farm_stop_all():
-    """⏹ СТОП ФАРМ ВСЕМ (v0.8): раньше кнопки не было на сервере, а широковещательный
-    «Фарм ⏹» из панели оставлял живое окно сбора — при следующем старте фарм
-    возвращался в сбор и казалось, что «стоп не работает». Теперь: окно сбора
-    снято у всех + farm ⏹ у всех (SIGTERM фарма закрывает роблоксы)."""
+    """⏹ СТОП ФАРМ ВСЕМ (v0.8): окно сбора снято у всех + farm ⏹ у всех.
+    ⏳ v0.11: телефоны, которые сейчас ОФЛАЙН/СПЯТ, раньше команду теряли
+    навсегда («нажал — ничего не происходит»). Теперь стоп ОТКЛАДЫВАЕТСЯ
+    для них и вручается при следующем подключении (hello), TTL 12ч.
+    Отложенные стопы снимаются «Сбором сейчас»/«НОВЫМ ЦИКЛОМ»/«Регой сейчас»."""
     targets = [did for did in devices
                if device_online(did) and not did.startswith("anon_")]
-    if not targets:
-        return {"ok": False, "sent": [],
-                "note": "нет онлайн-устройств"}
     sent = []
     for did in targets:
         ok1 = await send_task(did, "harvest.stop", {})   # окно сбора снять (не вернётся в сбор)
@@ -1163,9 +1349,27 @@ async def api_farm_stop_all():
             sent.append(did)
     global _HARVEST_RUNNING
     _HARVEST_RUNNING = False
-    log(f"[⏹] СТОП ФАРМ ВСЕМ: окно сбора снято + farm ⏹ → {sent}")
-    return {"ok": True, "sent": sent,
-            "note": "фарм остановлен на всех, окно сбора снято (роблоксы закрыты)"}
+    # ⏳ отложить для известных, но сейчас офлайн/полуживых устройств
+    online_set = set(targets)
+    offline = [did for did in known_devices()
+               if did not in online_set and did not in devices]
+    offline += [did for did in devices
+                if did not in online_set and not did.startswith("anon_")]
+    offline = sorted(set(offline))
+    if offline:
+        queue_pending(offline, "harvest.stop", {})
+        queue_pending(offline, "service.stop", {"name": "farm"})
+    if not targets and not offline:
+        return {"ok": False, "sent": [], "queued": [],
+                "note": "нет известных устройств — панель их ещё не видела "
+                        "(телефоны ни разу не подключались с момента первого запуска сервера)"}
+    note = "фарм остановлен на всех онлайн, окно сбора снято (роблоксы закрыты)"
+    if offline:
+        note += (f"; ⏳ отложено для {len(offline)} офлайн: {', '.join(offline[:8])}"
+                 f"{'…' if len(offline) > 8 else ''} — применится при их подключении")
+    log(f"[⏹] СТОП ФАРМ ВСЕМ: окно снято + farm ⏹ → онлайн {sent}; "
+        f"отложено {len(offline)}: {offline}")
+    return {"ok": True, "sent": sent, "queued": offline, "note": note}
 
 
 @app.post("/api/cookie/check")

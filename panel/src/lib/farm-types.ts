@@ -14,11 +14,15 @@ export type FarmDevice = {
   };
   uptime_sec: number;
   groups: string[];
+  /** ⏳ v0.11: отложенные критические команды, вручаются при подключении */
+  pending?: string[];
 };
 
 export type FarmDevicesResponse = {
   count: number;
   devices: FarmDevice[];
+  /** ⏳ v0.11: сколько всего команд ждут офлайн-телефоны */
+  pending_total?: number;
 };
 
 export type PoolEntry = {

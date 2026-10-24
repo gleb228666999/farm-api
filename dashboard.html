@@ -31,6 +31,10 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 .pbadge{border-radius:3px;padding:1px 5px;font-size:.78em}
 .pb-free{background:#253;color:#8f8}.pb-busy{background:#431;color:#fa0}.pb-arch{background:#243;color:#8cf}
 </style></head><body>
+<div style="background:#433505;border:1px solid #c93;color:#fc6;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:.95em">
+⚠️ ЭТО СТАРЫЙ ДАШБОРД. Основная панель — <b>:3000</b> (Farm Panel: «НОВЫЙ ЦИКЛ», «Стоп фарм всем»,
+тумблер регы акков, сбор-HOLD, без архива). Здесь часть функций устарела.
+</div>
 <h1>🚜 Farm Dashboard</h1>
 <div class="mut" id="summary">загрузка...</div>
 
@@ -89,17 +93,16 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button onclick="cookieCheckAll()">🍪 Проверка кук (все фармеры)</button>
 <div class="mut" style="margin-top:4px">🛡 БЕЗОПАСНЫЙ РЕЖИМ: рега акков ВЫКЛЮЧЕНА — новые акки не регистрируются, куки не перезаписываются, акки с лутом защищены (переключается тумблером выше, синхронизируется на ВСЕ телефоны).
 🌾 СБОР v2 = безопасный трейд: фармеры на время окна запускают treid.lua (масс-трейд лута) и заходят ТОЛЬКО в приватные сервера из id.txt хозяина (качается с GitHub, кэш на телефоне); вылетевший клон возвращается в СВОЮ приватку; после окна фарм-скрипт восстанавливается. Куки/акки при сборе НЕ трогаются — если целей нет, трейд просто ждёт (лут остаётся у фармера).
-📦 СБОРЩИК — ОТДЕЛЬНЫЙ телефон: device_id = collector-1 (в config.json), сервис «collector» (service.start collector): автоэкзекют = collet.lua (авто-приём трейдов), байпас v18.8 по кулдауну 24ч, те же приватки из id.txt. Сборщикам даётся 90с head-start до пачки 1. Фармеры = все онлайн-устройства кроме сборщиков и anon_* · сбор = 2 пачки по N мин (фармеры пополам) · если устройств не было онлайн в назначенное время — попытка повторится ещё 2 часа</div>
+📦 СБОРЩИК — ОТДЕЛЬНЫЙ телефон: device_id = collector-1 (в config.json), сервис «collector» (service.start collector): автоэкзекют = collet.lua (авто-приём трейдов), байпас v18.8 по кулдауну 24ч, те же приватки из id.txt. Фармеры = все онлайн-устройства кроме сборщиков и anon_* · сбор = HOLD (приватки с treid.lua до кнопки «НОВЫЙ ЦИКЛ» в панели :3000)</div>
 </div>
 
 <div class="panel">
 <b>🍪 Пул кук</b> <span class="mut" id="poolCounts">—</span><br>
 <textarea id="poolText" rows="4" placeholder="nick: user123&#10;pass: Pass123&#10;.ROBLOSECURITY=_|WARNING:...&#10;— или просто куки построчно"></textarea>
 <button class="b" onclick="poolAdd()">➕ Добавить в пул</button>
-<button class="b" onclick="poolAddArchive()">➕ Сразу в архив</button>
 <button class="g" onclick="loadPool()">♻ Обновить</button>
 <div id="poolList" style="margin-top:6px;max-height:240px;overflow:auto"></div>
-<div class="mut">✖ удалить · ⬇ в архив (можно поднять позже) · ⬆ вернуть в пул</div>
+<div class="mut">✖ удалить · 🗑 архив упразднён (v0.8): отработанные куки удаляются сразу</div>
 </div>
 
 <div style="margin-top:10px">
@@ -469,18 +472,14 @@ async function loadPool(){
     const c=j.counts||{};
     $('poolCounts').textContent='· в пуле: '+((c.pool||{}).total||0)
       +' (свободно '+((c.pool||{}).free||0)+', в работе '+((c.pool||{}).busy||0)+')'
-      +' · в архиве: '+((c.archive||{}).total||0);
-    const row=(e,isArch)=>`<div class="poolrow">
+      +' · 🗑 архива нет (v0.8)';
+    const row=(e)=>`<div class="poolrow">
       <span class="mut">#${e.id}</span> <b>${e.nick||'?'}</b>
-      ${pbBadge(e,isArch)}
+      ${pbBadge(e,false)}
       <span class="mut">${(e.cookie||'').slice(0,28)}… · ${e.source||''} · ${e.added_ts?new Date(e.added_ts*1000).toLocaleDateString('ru-RU'):''}</span>
       <button class="r" onclick="poolDel(${e.id})">✖</button>
-      ${isArch?`<button class="b" onclick="poolMove(${e.id},'pool')">⬆ в пул</button>`
-              :`<button class="g" onclick="poolMove(${e.id},'archive')">⬇ в архив</button>`}
       </div>`;
-    $('poolList').innerHTML='<b>Пул</b>'+(j.pool||[]).map(e=>row(e,false)).join('')
-      +'<b style="display:block;margin-top:6px">Архив</b>'+(j.archive||[]).map(e=>row(e,true)).join('')
-      ||'<span class="mut">пусто</span>';
+    $('poolList').innerHTML='<b>Пул</b>'+((j.pool||[]).map(e=>row(e)).join('')||'<span class="mut">пусто</span>');
   }catch(e){$('poolCounts').textContent='сервер недоступен'}
 }
 async function poolAddTo(toArchive){

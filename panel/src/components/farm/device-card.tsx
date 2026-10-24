@@ -219,7 +219,12 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
             <Badge className="bg-emerald-600">онлайн</Badge>
           ) : (
             <Badge variant="secondary" className="opacity-70">
-              офлайн · {device.last_seen_sec}с назад
+              офлайн{device.last_seen_sec != null ? ` · ${device.last_seen_sec}с назад` : " (известен ранее)"}
+            </Badge>
+          )}
+          {!!device.pending?.length && (
+            <Badge variant="outline" className="border-amber-500/60 text-amber-500">
+              ⏳ ждёт команд: {device.pending.length}
             </Badge>
           )}
           {device.client_version && (

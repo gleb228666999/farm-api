@@ -69,6 +69,7 @@ export function FunctionsPanel() {
   const { busy, sendTask, call, health } = useFarm();
   const netDown = useFarm((s) => s.netDown);   // 🆑 v0.9: сервер/сеть недоступны
   const [devices, setDevices] = useState<FarmDevice[] | null>(null);
+  const [pendingTotal, setPendingTotal] = useState(0);   // ⏳ v0.11
   const [target, setTarget] = useState<string>("*");
 
   const [harvestOpen, setHarvestOpen] = useState(false);
@@ -103,7 +104,10 @@ export function FunctionsPanel() {
       dedupe: true,
       timeout: 8,
     });
-    if (res.ok && res.data) setDevices(res.data.devices || []);
+    if (res.ok && res.data) {
+      setDevices(res.data.devices || []);
+      setPendingTotal(res.data.pending_total || 0);   // ⏳ v0.11
+    }
   }, [call]);
 
   useEffect(() => {
@@ -526,6 +530,17 @@ export function FunctionsPanel() {
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-1.5 px-4">
+            {pendingTotal > 0 && (
+              <Badge variant="outline" className="w-full border-amber-500/50 text-amber-500">
+                ⏳ отложенных команд: {pendingTotal} — «Стоп фарм всем»/тумблер регы догонят
+                офлайн-телефоны при подключении (снять: вкладка «Команды»)
+              </Badge>
+            )}
+            {connected && onlineDevices.length === 0 && (
+              <Badge variant="outline" className="w-full border-amber-500/50 text-amber-500">
+                ⚠️ нет устройств на связи — «для всех» уйдут только «Стоп фарм всем» и тумблер регы (отложкой)
+              </Badge>
+            )}
             <Button
               size="sm"
               variant="outline"
@@ -576,7 +591,8 @@ export function FunctionsPanel() {
               Сбор сейчас = HOLD: фармеры зайдут в приватки с treid.lua и сидят там, пока не
               нажмёшь «НОВЫЙ ЦИКЛ» — только он завершает сбор (снимает окно → фарм ⏹ → рега акков
               → фарм сам поднимется с новыми акками). «Стоп фарм всем» = окно снято + фарм ⏹ на
-              всех (без рега). Кнопки — команды серверу, селектор цели не учитывается.
+              всех (без рега); спящие/офлайн-телефоны получат его при подключении (⏳ отложка).
+              Кнопки — команды серверу, селектор цели не учитывается.
             </p>
           </CardContent>
         </Card>

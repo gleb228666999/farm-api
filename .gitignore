@@ -5,3 +5,5 @@ info/
 logs/
 schedule.json
 schedule_state.json
+pending_commands.json
+known_devices.json
