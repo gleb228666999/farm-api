@@ -1,75 +1,118 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>🚜 Farm</title>
+<html><head><meta charset="utf-8"><title>🚜 Farm Panel</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- ЕДИНАЯ ПАНЕЛЬ v1.2 — всё на одной странице, без отдельных меню.
+     Отдаётся FastAPI на :8000 → portmap :55019. Других адресов нет. -->
 <style>
-body{font-family:system-ui;background:#111;color:#ddd;margin:20px}
-table{border-collapse:collapse;width:100%;margin-top:12px}
-td,th{padding:8px 12px;border-bottom:1px solid #333;text-align:left;font-size:.95em}
+body{font-family:system-ui;background:#111;color:#ddd;margin:14px}
+h1{font-size:1.35em;margin:0 0 6px}
+table{border-collapse:collapse;width:100%;margin-top:10px}
+td,th{padding:7px 10px;border-bottom:1px solid #333;text-align:left;font-size:.93em;white-space:nowrap}
+.tblwrap{overflow-x:auto;border:1px solid #2a2a2a;border-radius:6px}
 .on{color:#6f6}.off{color:#f66}
-button{background:#2a6;border:none;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer;margin:1px}
+button{background:#2a6;border:none;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer;margin:1px;font-size:.92em}
 button.b{background:#26a}button.r{background:#a33}button.u{background:#c93}button.g{background:#555}
+button.big{padding:11px 14px;font-size:1.02em;font-weight:bold;border-radius:7px;margin:3px;min-width:150px}
+button.mega{padding:14px 18px;font-size:1.1em;font-weight:bold;border-radius:8px;margin:3px;min-width:46%}
+button:disabled{opacity:.45;cursor:wait}
 #out{background:#000;color:#9f9;padding:12px;border-radius:6px;margin-top:14px;
-     white-space:pre-wrap;font-family:monospace;max-height:340px;overflow:auto;display:none}
+     white-space:pre-wrap;font-family:monospace;font-size:.86em;max-height:340px;overflow:auto;display:none}
 .mut{color:#888;font-size:.85em}.sel{background:#1c2b1c}
 .gbadge{background:#333;color:#fc6;border-radius:3px;padding:1px 5px;font-size:.78em;margin-left:4px}
+.pbadge{border-radius:3px;padding:1px 5px;font-size:.78em;background:#431;color:#fa0}
 .chk{transform:scale(1.25);cursor:pointer}
 .evrow{border-bottom:1px dotted #333;padding:2px 0}
-.ev-bypass.ok{color:#6f6}.ev-bypass\.fail{color:#f66}.ev-farm\.restart{color:#fa0}
-.ev-farm\.start,.ev-farm\.stop,.ev-farm\.crash{color:#fc6}
-.ev-harvest\.start,.ev-harvest\.end{color:#8f8}.ev-rega\.done{color:#6f6}
-.ev-rega\.fail,.ev-check\.fail,.ev-farm\.no_cookies{color:#f66}
-.ev-farm\.rega_done{color:#6f6}.ev-farm\.rega_empty,.ev-farm\.rega_started{color:#fa0}
-.ev-pool\.claim,.ev-pool\.push{color:#ff9}
-.ev-check\.replace{color:#8cf}.ev-rega\.start{color:#fc6}.ev-rega\.stray{color:#fa0}
-.panel{margin-top:10px;padding:8px 10px;border:1px solid #333;border-radius:6px;background:#181818}
-select{background:#222;color:#ddd;padding:4px 8px;border:1px solid #444;border-radius:4px}
-textarea{background:#111;color:#9f9;border:1px solid #444;border-radius:4px;width:100%;
-        font-family:monospace;font-size:.85em;box-sizing:border-box}
-input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px}
-.big{padding:10px 16px;font-size:1.05em;border-radius:6px;margin:3px;font-weight:bold}
+.panel{margin-top:12px;padding:10px 12px;border:1px solid #333;border-radius:8px;background:#181818}
+.panel h2{font-size:1.05em;margin:0 0 8px}
+select,input.tt,textarea{background:#222;color:#ddd;border:1px solid #444;border-radius:4px}
+input.tt{padding:4px 6px}
+textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:border-box}
+#banner{background:#4a1010;border:1px solid #f66;color:#faa;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:.95em;display:none}
+#banner button{background:#a33}
+.flex{display:flex;flex-wrap:wrap;gap:2px;align-items:center}
 .poolrow{display:flex;gap:6px;align-items:center;border-bottom:1px dotted #333;padding:2px 0;flex-wrap:wrap}
-.pbadge{border-radius:3px;padding:1px 5px;font-size:.78em}
-.pb-free{background:#253;color:#8f8}.pb-busy{background:#431;color:#fa0}.pb-arch{background:#243;color:#8cf}
+.mega-row{display:flex;flex-wrap:wrap;justify-content:space-between;background:#122012;
+          border:2px solid #4a4;border-radius:10px;padding:10px;margin-top:10px}
+.mega-row .col{display:flex;flex-wrap:wrap;gap:2px;align-items:center}
 </style></head><body>
-<div style="background:#433505;border:1px solid #c93;color:#fc6;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:.95em">
-⚠️ ЭТО СТАРЫЙ ДАШБОРД. Основная панель — <b>:3000</b> (Farm Panel: «НОВЫЙ ЦИКЛ», «Стоп фарм всем»,
-тумблер регы акков, сбор-HOLD, без архива). Здесь часть функций устарела.
-</div>
-<h1>🚜 Farm Dashboard</h1>
+<h1>🚜 Farm Panel <span class="mut">v1.2 — всё на одной странице</span></h1>
 <div class="mut" id="summary">загрузка...</div>
 
-<div class="panel" style="border:2px solid #4a4;background:#122012">
-<b style="font-size:1.15em">🎛 КНОПКИ ФУНКЦИЙ</b>
-<span class="mut" id="selInfo"> — кликни по устройству в таблице ниже, потом жми кнопку</span><br><br>
-<button class="big b" onclick="ping(selected)">📢 Ping</button>
-<button class="big b" onclick="st(selected)">📊 Статус</button>
-<button class="big" onclick="farmOn(selected)">🚜 Фарм ▶</button>
-<button class="big r" onclick="farmOff(selected)">🚜 Фарм ⏹</button>
-<button class="big" style="background:#a4a" title="сброс кулдауна ключа → фарм ⏹ → фарм ▶" onclick="bypassSel(selected)">🔓 БАЙПАС</button>
-<button class="big" id="btnRega" title="рега 20 попыток на устройстве (работает только при включенной реге)" onclick="rega(selected)">🆕 Рег акков</button>
-<button class="big" onclick="harvestOn(selected)">🌾 Сбор ▶</button>
-<button class="big r" onclick="harvestOff(selected)">🌾 Сбор ⏹</button>
-<button class="big" onclick="cookieCheck(selected)">🍪 Проверка кук</button>
-<button class="big b" onclick="farmLog(selected)">📄 farm.log</button>
-<button class="big b" onclick="farmState(selected)">📄 farm_state</button>
-<button class="big b" onclick="ev(selected)">📅 События</button>
-<button class="big u" onclick="upd(selected)">⬆ Update</button>
-<button class="big u" onclick="apk(selected)">⬇ APK</button>
-<button class="big b" onclick="exe(selected)">💻 Exec</button>
-<button class="big g" title="перезапуск клиента на телефоне" onclick="restartCli(selected)">♻️ Restart</button>
-<button class="big r" title="полный стоп клиента и сервисов" onclick="haltCli(selected)">⛔ Halt</button>
-<div class="mut" style="margin-top:6px">🔓 БАЙПАС (v0.18) = полный цикл v18.8 на телефоне: Delta → реклама → ZEN-API → ключ → license. 📱 Ориентация ВСЕГДА горизонтальная. 🍪 ПЕРЕД байпасом — проверка ЖИВОГО акка на главном Roblox (API): нет акка → байпас отменён, флаг сохраняется (🛡 при выключенной реге байпас просто ждёт живой акк). ✅ Байпас работает и ВО ВРЕМЯ окна сбора (сбор продолжится после). Вылетевший клон при фарме/сборе сам перезапускается в плейс/приватку. 🆕 Рег акков работает ТОЛЬКО при включенном тумблере регы (safe-режим по умолчанию)</div>
+<div id="banner">
+⏳ <b>Есть отложенные команды</b> — телефоны, которые были офлайн/спали, получат их при подключении:<br>
+<span id="bannerList"></span><br>
+<button onclick="clearPending()">🗑 Снять отложенные команды</button>
+<span class="mut"> («Сбор» / «НОВЫЙ ЦИКЛ» / «Рега сейчас» сами снимают старые стопы)</span>
 </div>
 
-<table><thead><tr><th>гр</th><th>Устройство</th><th>Модель</th><th>Батарея</th>
-<th>🔑 ключ</th><th>Версия</th><th>Аптайм</th><th>Был</th><th>Действия</th></tr></thead>
-<tbody id="rows"></tbody></table>
+<div class="mega-row">
+  <div class="col">
+    <button class="mega" style="background:#2a6" onclick="harvestNow()">🌾 СБОР СЕЙЧАС<br><span class="mut" style="font-weight:normal">приватки + treid.lua, сидят до «НОВЫЙ ЦИКЛ»</span></button>
+    <button class="mega" style="background:#a4a" onclick="cycleNew()">🔁 НОВЫЙ ЦИКЛ<br><span class="mut" style="font-weight:normal">сбор снят → рега акков → фарм сам</span></button>
+  </div>
+  <div class="col">
+    <button class="mega r" onclick="farmStopAll()">⏹ СТОП ФАРМ ВСЕМ<br><span class="mut" style="font-weight:normal">окно сбора снять + фарм ⏹ у всех</span></button>
+    <button class="mega" style="background:#c93" onclick="regaNow()">🆕 РЕГА СЕЙЧАС<br><span class="mut" style="font-weight:normal">на всех онлайн-фармерах</span></button>
+  </div>
+</div>
 
 <div class="panel">
-<b>👥 Группы</b> <span class="mut">(галочка «гр» у строки = выбрано)</span><br>
-<select id="groupSel" onchange="renderGroupInfo()"></select>
-<span id="groupInfo" class="mut"></span><br>
-<button class="b" onclick="saveGroup()">💾 Сохранить выбранные как группу</button>
+<div class="flex">
+  <button id="regaSw" style="padding:7px 14px;font-weight:bold" onclick="regaSwitch()">🛡 Рега акков: ?</button>
+  <span class="mut" id="regaSwNote"></span>
+</div>
+<div class="flex" style="margin-top:8px">
+  <button onclick="cookieCheckAll()">🍪 Проверка кук (все фармеры)</button>
+  <button class="b" onclick="bcastPing()">📢 Ping всем</button>
+  <button class="u" onclick="updAll()">⬆ Update всех</button>
+  <button class="u" onclick="apkAll()">⬇ APK всем</button>
+  <button onclick="bcastFarmStart()">🚜 farm ▶ всем</button>
+  <button class="r" onclick="bcastFarmStop()">🚜 farm ⏹ всем</button>
+</div>
+</div>
+
+<div class="panel">
+<h2>📱 Устройства <span class="mut" id="selInfo"> — кликни по строке, потом жми кнопку</span></h2>
+<div class="tblwrap"><table>
+<tr><th></th><th>устройство</th><th>модель</th><th>🔋</th><th>🔑</th><th>версия</th><th>аптайм</th><th>связь</th><th>действия</th></tr>
+<tbody id="rows"><tr><td colspan="9" class="mut">загрузка...</td></tr></tbody>
+</table></div>
+<div class="mut" style="margin-top:6px">галочка слева = попасть в группу (блок «Группы» ниже)</div>
+</div>
+
+<div class="panel">
+<h2>⏰ Расписание <span class="mut" id="schedState"></span></h2>
+<div class="flex">
+<span class="mut">рега ежедневно в</span> <input class="tt" id="regaTime" size="5" value="03:00">
+<span class="mut">сбор в</span> <input class="tt" id="harvestTime" size="5" value="20:00">
+<span class="mut">пачка</span> <input class="tt" id="batchMin" size="3" value="20"> <span class="mut">мин</span>
+</div>
+<div class="flex" style="margin-top:6px">
+<span class="mut">проверка кук каждые</span> <input class="tt" id="checkMin" size="3" value="30"> <span class="mut">мин</span>
+<span class="mut">приватка сбора placeId (пусто = своя):</span> <input class="tt" id="hwPlace" size="12">
+<button class="b" onclick="saveSched()">💾 Сохранить расписание</button>
+</div>
+</div>
+
+<div class="panel">
+<h2>🍪 Пул кук <span class="mut" id="poolCounts">—</span></h2>
+<textarea id="poolText" rows="4" placeholder="nick: user123&#10;pass: Pass123&#10;.ROBLOSECURITY=_|WARNING:...&#10;— или просто куки построчно"></textarea>
+<div class="flex" style="margin-top:6px">
+<button class="b" onclick="poolAdd()">➕ Добавить в пул</button>
+<button class="g" onclick="loadPool()">♻ Обновить</button>
+<span class="mut">отработанные куки удаляются сразу (архива нет)</span>
+</div>
+<div id="poolList" style="margin-top:6px;max-height:220px;overflow:auto"></div>
+</div>
+
+<div class="panel">
+<h2>👥 Группы</h2>
+<div class="flex">
+<select id="groupSel" onchange="renderGroupInfo()"><option value="">— выбери группу —</option></select>
+<span class="mut" id="groupInfo"></span>
+</div>
+<div class="flex" style="margin-top:6px">
+<button class="b" onclick="saveGroup()">💾 Сохранить из галочек</button>
 <button class="g" onclick="delGroup()">🗑 Удалить группу</button>
 <button onclick="groupAct('farmStart')">🚜 farm ▶ группе</button>
 <button class="r" onclick="groupAct('farmStop')">🚜 farm ⏹ группе</button>
@@ -77,55 +120,44 @@ input.tt{background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padd
 <button class="u" onclick="groupAct('upd')">⬆ группе</button>
 <button class="b" onclick="groupAct('ping')">📢 ping группе</button>
 </div>
-
-<div class="panel">
-<b>🌾 Сбор + 🆕 Рега (расписание МСК)</b> <span class="mut" id="schedState"></span><br>
-<button id="regaSw" onclick="regaSwitch()" style="padding:5px 12px;font-weight:bold">🆕 Рега акков: ?</button>
-<span class="mut" id="regaSwNote"></span><br>
-<span class="mut">рега ежедневно в</span> <input class="tt" id="regaTime" size="5" value="03:00">
-<span class="mut">сбор в</span> <input class="tt" id="harvestTime" size="5" value="20:00">
-<span class="mut">пачка</span> <input class="tt" id="batchMin" size="3" value="20"> <span class="mut">мин (2 пачки)</span>
-<span class="mut">проверка кук каждые</span> <input class="tt" id="checkMin" size="3" value="30"> <span class="mut">мин</span>
-<span class="mut">приватка сбора (placeId, пусто = своя):</span> <input class="tt" id="hwPlace" size="12">
-<button class="b" onclick="saveSched()">💾 Сохранить расписание</button>
-<button onclick="regaNow()">🆕 Рега сейчас</button>
-<button onclick="harvestNow()">🌾 Сбор сейчас</button>
-<button onclick="cookieCheckAll()">🍪 Проверка кук (все фармеры)</button>
-<div class="mut" style="margin-top:4px">🛡 БЕЗОПАСНЫЙ РЕЖИМ: рега акков ВЫКЛЮЧЕНА — новые акки не регистрируются, куки не перезаписываются, акки с лутом защищены (переключается тумблером выше, синхронизируется на ВСЕ телефоны).
-🌾 СБОР v2 = безопасный трейд: фармеры на время окна запускают treid.lua (масс-трейд лута) и заходят ТОЛЬКО в приватные сервера из id.txt хозяина (качается с GitHub, кэш на телефоне); вылетевший клон возвращается в СВОЮ приватку; после окна фарм-скрипт восстанавливается. Куки/акки при сборе НЕ трогаются — если целей нет, трейд просто ждёт (лут остаётся у фармера).
-📦 СБОРЩИК — ОТДЕЛЬНЫЙ телефон: device_id = collector-1 (в config.json), сервис «collector» (service.start collector): автоэкзекют = collet.lua (авто-приём трейдов), байпас v18.8 по кулдауну 24ч, те же приватки из id.txt. Фармеры = все онлайн-устройства кроме сборщиков и anon_* · сбор = HOLD (приватки с treid.lua до кнопки «НОВЫЙ ЦИКЛ» в панели :3000)</div>
 </div>
 
 <div class="panel">
-<b>🍪 Пул кук</b> <span class="mut" id="poolCounts">—</span><br>
-<textarea id="poolText" rows="4" placeholder="nick: user123&#10;pass: Pass123&#10;.ROBLOSECURITY=_|WARNING:...&#10;— или просто куки построчно"></textarea>
-<button class="b" onclick="poolAdd()">➕ Добавить в пул</button>
-<button class="g" onclick="loadPool()">♻ Обновить</button>
-<div id="poolList" style="margin-top:6px;max-height:240px;overflow:auto"></div>
-<div class="mut">✖ удалить · 🗑 архив упразднён (v0.8): отработанные куки удаляются сразу</div>
+<h2>📅 События фарма</h2>
+<div class="flex">
+<button class="b" onclick="showEvents()">📅 Показать последние</button>
+<button class="g" onclick="clearEvents()">🗑 Очистить историю</button>
+</div>
+<div id="evList" class="mut" style="margin-top:6px;max-height:200px;overflow:auto"></div>
 </div>
 
-<div style="margin-top:10px">
-<button class="b" onclick="bcast()">📢 Ping всем</button>
-<button class="u" onclick="updAll()">⬆ Обновить всех</button>
-<button class="u" onclick="apkAll()">⬇ APK всем</button>
-<button onclick="bcastFarmStart()">🚜 farm ▶ всем</button>
-<button class="r" onclick="bcastFarmStop()">🚜 farm ⏹ всем</button>
-<button class="b" onclick="showEvents()">📅 События (все)</button>
-<button class="g" onclick="clearEvents()">📅 Очистить историю</button>
-</div>
-<div class="mut" style="margin-top:8px">клик по строке = выбрать устройство · галочка «гр» = в группу · все функции также на кнопках 🎛 сверху и в строках таблицы</div>
 <div id="out"></div>
+<div class="mut" style="margin-top:10px">
+🛡 Рега ВЫКЛ = безопасный режим (акки с лутом защищены). 🌾 СБОР = HOLD: фармеры сидят в приватках,
+пока не нажат «🔁 НОВЫЙ ЦИКЛ» — только он включает регу и ставит фарм. Отработанные куки удаляются (архива нет).
+</div>
+
 <script>
 let selected=null;
-let GROUPS={};                    // имя -> [device_id]
-const checked=new Set();          // галочки «гр» (живут между обновлениями таблицы)
+let GROUPS={};
+let POOL_TEXT={};
+const checked=new Set();
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function show(t){$('out').style.display='block';$('out').textContent=t}
-async function sendTask(body){
-  if(!selected){show('❌ сначала кликни по устройству');return null}
-  const r=await fetch(`/api/devices/${selected}/send`,{method:'POST',
+window._regaEnabled=null;        // kill-switch регы: true/false/null
+window._harvestRunning=null;     // HOLD-сбор идёт?
+
+function show(t){
+  const o=$('out');o.style.display='block';
+  const ts=new Date().toLocaleTimeString('ru-RU');
+  o.textContent='──── '+ts+' ────\n'+t+'\n\n'+o.textContent;
+}
+function busy(btn,on){if(btn)btn.disabled=on}
+
+// ---------- отправка задач на устройство ----------
+async function sendTask(dev,body){
+  if(!dev){show('❌ сначала кликни по устройству');return null}
+  const r=await fetch('/api/devices/'+dev+'/send',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!r.ok){show('❌ '+await r.text());return null}
   return await r.json();
@@ -139,84 +171,43 @@ async function waitResult(id,ms=20000){
   }
   return null;
 }
-async function run(body,label,ms){
-  const t=await sendTask(body);if(!t)return;
+async function run(d,body,label,ms){
+  const t=await sendTask(d,body);if(!t)return;
   show('⏳ '+label+'... (task '+t.task_id+')');
   const res=await waitResult(t.task_id,ms||20000);
   if(!res){show('⏰ '+label+': нет ответа (task '+t.task_id+')\nпроверь позже: /api/results/'+t.task_id);return}
-  show(label+' ✓\n\n'+JSON.stringify(res.data,null,2).slice(0,4000));
+  show(label+' ✓\n'+JSON.stringify(res.data,null,2).slice(0,4000));
 }
-function ping(d){selected=d;run({type:'task',task:'ping'},'ping')}
-function st(d){selected=d;run({type:'task',task:'service.status'},'service.status')}
-function demoOn(d){selected=d;run({type:'task',task:'service.start',payload:{name:'demo'}},'demo start')}
-function demoOff(d){selected=d;run({type:'task',task:'service.stop',payload:{name:'demo'}},'demo stop',30000)}
-function demoLog(d){selected=d;run({type:'task',task:'file.read',payload:{path:'logs/services/demo.log',tail:3000}},'demo.log')}
-function farmOn(d){selected=d;run({type:'task',task:'service.start',payload:{name:'farm'}},'farm start')}
-function farmOff(d){selected=d;run({type:'task',task:'service.stop',payload:{name:'farm'}},'farm stop',30000)}
-function farmLog(d){selected=d;run({type:'task',task:'file.read',payload:{path:'logs/services/farm.log',tail:3000}},'farm.log')}
-function farmState(d){selected=d;run({type:'task',task:'file.read',payload:{path:'info/farm_state.json',tail:500}},'farm_state.json')}
-function apk(d){selected=d;run({type:'task',task:'apk.update'},'⬇ APK установка/обновление',480000)}
-function cookieCheck(d){selected=d;run({type:'task',task:'cookie.check'},'🍪 проверка кук')}
+function ping(d){selected=d;run(selected,{type:'task',task:'ping'},'ping')}
+function st(d){selected=d;run(selected,{type:'task',task:'service.status'},'service.status')}
+function demoOn(d){selected=d;run(selected,{type:'task',task:'service.start',payload:{name:'demo'}},'demo start')}
+function demoOff(d){selected=d;run(selected,{type:'task',task:'service.stop',payload:{name:'demo'}},'demo stop',30000)}
+function demoLog(d){selected=d;run(selected,{type:'task',task:'file.read',payload:{path:'logs/services/demo.log',tail:3000}},'demo.log')}
+function farmOn(d){selected=d;run(selected,{type:'task',task:'service.start',payload:{name:'farm'}},'farm start')}
+function farmOff(d){selected=d;run(selected,{type:'task',task:'service.stop',payload:{name:'farm'}},'farm stop',30000)}
+function farmLog(d){selected=d;run(selected,{type:'task',task:'file.read',payload:{path:'logs/services/farm.log',tail:3000}},'farm.log')}
+function farmState(d){selected=d;run(selected,{type:'task',task:'file.read',payload:{path:'info/farm_state.json',tail:500}},'farm_state.json')}
+function apk(d){selected=d;run(selected,{type:'task',task:'apk.update'},'⬇ APK установка/обновление',480000)}
+function cookieCheck(d){selected=d;run(selected,{type:'task',task:'cookie.check'},'🍪 проверка кук')}
 function exe(d){
   selected=d;
   const c=prompt('Shell-команда на '+d+':','');
-  if(c)run({type:'task',task:'exec',payload:{command:c,timeout:30}},'$ '+c,35000);
-}
-// ---------- 🔓 БАЙПАС + 🆕 рега + 🌾 сбор + ♻️/⛔ по устройству ----------
-const RESET_KEY_CMD='python -c "import json,pathlib;p=pathlib.Path(\'info/farm_state.json\');d=json.loads(p.read_text()) if p.exists() else {};d[\'last_key_time\']=0;p.write_text(json.dumps(d))"';
-async function bypassSel(d){
-  if(!d){show('❌ сначала кликни по устройству');return}
-  if(!confirm('🔓 БАЙПАС '+d+' (как в v18.8):\nDelta → реклама → ZEN-API → ключ → license\n+ вылетевшие клоны перезапускаются в плейс.\nПродолжить?'))return;
-  selected=d;
-  show('🔓 Байпас '+d+': отправляю bypass.run...');
-  const t=await sendTask({type:'task',task:'bypass.run',payload:{source:'dashboard'}});
-  if(t){
-    const res=await waitResult(t.task_id,25000);
-    if(res&&res.data&&res.data.ok){
-      show('🔓 БАЙПАС '+d+' ЗАПУЩЕН ✓\n\nфарм на телефоне сейчас выполнит ПОЛНЫЙ цикл v18.8:\nDelta → реклама → ZEN-API → ключ → license (read-back)\n(≤30 сек если фарм жив; не жил — запущен автоматически)\n\nвылетевшие клоны перезапускаются в плейс мониторингом каждые 30с\n(и при фарме, и при сборе)\n\nсмотри 📅 События: bypass.ok / bypass.fail / farm.restart\n\n'+JSON.stringify(res.data,null,2).slice(0,1200));
-      return;
-    }
-    show('⚠️ bypass.run не поддержан (старый клиент? жми ⬆ Update) — переключаюсь на запасной способ...');
-    await new Promise(r=>setTimeout(r,2500));
-  }
-  show('🔓 Байпас '+d+' (запасной способ): шаг 1/3 — сброс кулдауна ключа...');
-  const t1=await sendTask({type:'task',task:'exec',payload:{command:RESET_KEY_CMD,timeout:20}});
-  if(t1){const r1=await waitResult(t1.task_id,25000);show(r1?'🔓 шаг 1/3 ✓ — кулдаун сброшен':'⏰ шаг 1/3: нет ответа exec');}
-  await sleep(2000);
-  show('🔓 Байпас '+d+': шаг 2/3 — фарм ⏹ (закрывает роблоксы)...');
-  const t2=await sendTask({type:'task',task:'service.stop',payload:{name:'farm'}});
-  if(t2){const r2=await waitResult(t2.task_id,30000);show(r2?'🔓 шаг 2/3 ✓ — фарм остановлен':'⏰ шаг 2/3: нет ответа');}
-  await sleep(3000);
-  show('🔓 Байпас '+d+': шаг 3/3 — фарм ▶ (старт → сразу полный байпас v18.8)...');
-  const t3=await sendTask({type:'task',task:'service.start',payload:{name:'farm'}});
-  if(!t3)return;
-  const r3=await waitResult(t3.task_id,20000);
-  show('🔓 БАЙПАС '+d+' ГОТОВ ✓\nфарм перезапущен → сам выполнит полный цикл v18.8 (Delta → ZEN-API → ключ → license).\nсмотри 📅 События: bypass.*\n\n'+(r3?JSON.stringify(r3.data,null,2).slice(0,1500):''));
-}
-function rega(d){
-  if(!d){show('❌ сначала кликни по устройству');return}
-  if(regaGuarded())return;
-  if(!confirm('🆕 Рег акков на '+d+'? (20 попыток, отдых 15 мин после каждых 10; случайно запущенные клоны во время реги закрываются автоматически)\n\n⚠️ Куки на этом телефоне будут ПЕРЕЗАПИСАНЫ — акк с лутом потеряет доступ!'))return;
-  selected=d;run({type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
-}
-function harvestOn(d){
-  if(!d){show('❌ сначала кликни по устройству');return}
-  const m=prompt('🌾 Сбор на '+d+': минут (пусто = 20):','20');if(m===null)return;
-  selected=d;run({type:'task',task:'harvest.start',payload:{minutes:parseInt(m)||20}},'🌾 Сбор старт ('+d+', '+(parseInt(m)||20)+' мин)',20000);
+  if(c)run(selected,{type:'task',task:'exec',payload:{command:c,timeout:30}},'$ '+c,35000);
 }
 function harvestOff(d){
   if(!d){show('❌ сначала кликни по устройству');return}
-  selected=d;run({type:'task',task:'harvest.stop'},'🌾 Сбор стоп ('+d+')',30000);
+  if(!confirm('🌾⏹ Снять окно сбора на '+d+'? (выйдет из приваток, закроет роблоксы)'))return;
+  selected=d;run(selected,{type:'task',task:'harvest.stop'},'🌾 Сбор стоп ('+d+')',30000);
 }
 function restartCli(d){
   if(!d){show('❌ сначала кликни по устройству');return}
   if(!confirm('♻️ Restart клиента '+d+'? (клиент перезапустится сам)'))return;
-  selected=d;run({type:'task',task:'restart'},'♻️ restart ('+d+')',15000);
+  selected=d;run(selected,{type:'task',task:'restart'},'♻️ restart ('+d+')',15000);
 }
 function haltCli(d){
   if(!d){show('❌ сначала кликни по устройству');return}
   if(!confirm('⛔ HALT '+d+': ПОЛНЫЙ стоп клиента и всех сервисов?'))return;
-  selected=d;run({type:'task',task:'halt'},'⛔ halt ('+d+')',15000);
+  selected=d;run(selected,{type:'task',task:'halt'},'⛔ halt ('+d+')',15000);
 }
 function keyAge(d){
   const f=d.info&&d.info.farm;
@@ -226,29 +217,183 @@ function keyAge(d){
   if(h<24)return h.toFixed(1)+'ч';
   return Math.round(h/24)+'д';
 }
-// ---------- 📅 события фарма (этап 2) ----------
-function fmtTs(ts){return new Date(ts*1000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
-function evText(j){
-  return '📅 событий: '+j.count+'\n\n'+j.events.map(e=>{
-    const inf=Object.entries(e.info||{}).map(([k,v])=>k+'='+v).join(' ');
-    return fmtTs(e.ts)+'  '+e.device_id+'  '+e.type+(inf?'  ('+inf+')':'');
-  }).join('\n');
+
+// ---------- 🔓 байпас ----------
+const RESET_KEY_CMD='python -c "import json,pathlib;p=pathlib.Path(\'info/farm_state.json\');d=json.loads(p.read_text()) if p.exists() else {};d[\'last_key_time\']=0;p.write_text(json.dumps(d))"';
+async function bypassSel(d){
+  if(!d){show('❌ сначала кликни по устройству');return}
+  if(!confirm('🔓 БАЙПАС '+d+' (как в v18.8):\nDelta → реклама → ZEN-API → ключ → license\n+ вылетевшие клоны перезапускаются в плейс.\nПродолжить?'))return;
+  selected=d;
+  show('🔓 Байпас '+d+': отправляю bypass.run...');
+  const t=await sendTask(selected,{type:'task',task:'bypass.run',payload:{source:'panel'}});
+  if(t){
+    const res=await waitResult(t.task_id,25000);
+    if(res&&res.data&&res.data.ok){
+      show('🔓 БАЙПАС '+d+' ЗАПУЩЕН ✓\nфарм выполнит полный цикл v18.8: Delta → реклама → ZEN-API → ключ → license.\nвылетевшие клоны перезапускаются мониторингом каждые 30с.\nсмотри 📅 События: bypass.ok / bypass.fail / farm.restart');
+      return;
+    }
+    show('⚠️ bypass.run не поддержан (старый клиент?) — запасной способ...');
+    await sleep(2000);
+  }
+  show('🔓 Байпас '+d+': шаг 1/3 — сброс кулдауна ключа...');
+  const t1=await sendTask(selected,{type:'task',task:'exec',payload:{command:RESET_KEY_CMD,timeout:20}});
+  if(t1){const r1=await waitResult(t1.task_id,25000);show(r1?'🔓 шаг 1/3 ✓':'⏰ шаг 1/3: нет ответа');}
+  await sleep(2000);
+  show('🔓 шаг 2/3 — фарм ⏹...');
+  const t2=await sendTask(selected,{type:'task',task:'service.stop',payload:{name:'farm'}});
+  if(t2){const r2=await waitResult(t2.task_id,30000);show(r2?'🔓 шаг 2/3 ✓':'⏰ шаг 2/3: нет ответа');}
+  await sleep(3000);
+  show('🔓 шаг 3/3 — фарм ▶ (полный байпас при старте)...');
+  const t3=await sendTask(selected,{type:'task',task:'service.start',payload:{name:'farm'}});
+  if(!t3)return;
+  const r3=await waitResult(t3.task_id,20000);
+  show('🔓 БАЙПАС '+d+' ГОТОВ ✓\nфарм перезапущен → сам выполнит полный цикл v18.8.\n'+(r3?JSON.stringify(r3.data,null,2).slice(0,1200):''));
 }
-async function showEventsFor(dev){
-  const r=await fetch('/api/events?limit=150&device_id='+encodeURIComponent(dev));
-  show('📅 события фарма: '+dev+'\n\n'+evText(await r.json()));
+
+// ---------- 🆕 рега (килл-свитч + запуск) ----------
+function renderRegaSw(){
+  const b=$('regaSw');
+  if(window._regaEnabled===null){b.textContent='🛡 Рега акков: ?';b.style.background='#2a6';$('regaSwNote').textContent='';return}
+  if(window._regaEnabled){
+    b.textContent='🛡 Рега акков: ВКЛ ⚠️';b.style.background='#c93';
+    $('regaSwNote').textContent='регистрация ИДЁТ — куки клонов перезаписываются!';
+  }else{
+    b.textContent='🛡 Рега акков: ВЫКЛ';b.style.background='#a33';
+    $('regaSwNote').textContent='безопасный режим — акки с лутом защищены (фарм и сбор работают)';
+  }
 }
-function ev(d){selected=d;showEventsFor(d)}
-async function showEvents(){
-  const r=await fetch('/api/events?limit=200');
-  show('📅 события фарма (все телефоны)\n\n'+evText(await r.json()));
+function regaGuarded(){
+  if(window._regaEnabled===false){
+    show('🛡 РЕГА АККОВ ВЫКЛЮЧЕНА (безопасный режим) — регистрация НЕ идёт: ни по кнопке, ни автоматически.\n\nВключить: тумблер «🛡 Рега акков» вверху страницы (или кнопка «🔁 НОВЫЙ ЦИКЛ»).');
+    return true;
+  }
+  return false;
 }
-async function clearEvents(){
-  if(!confirm('Очистить ВСЮ историю событий?'))return;
-  await fetch('/api/events',{method:'DELETE'});
-  show('🗑 история событий очищена');
+async function regaSwitch(){
+  const target=!(window._regaEnabled===true);
+  if(target){
+    if(!confirm('ВКЛЮЧИТЬ регу акков?\nТелефоны снова начнут регистрировать НОВЫЕ акки — куки на клонах будут перезаписываться!\nАкки с лутом могут потеряться.'))return;
+  }else{
+    if(!confirm('ОТКЛЮЧИТЬ регу акков (безопасный режим)?\nАвторегистрация и замена кук остановятся на ВСЕХ телефонах — акки с лутом защищены.\nФарм и СБОР продолжат работать.'))return;
+  }
+  const r=await fetch('/api/rega/switch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:target})});
+  const j=await r.json();
+  window._regaEnabled=!!j.rega_enabled;renderRegaSw();
+  show((j.ok?'🛡 Килл-свитч регы переключён:\n':'❌ ')+(j.note||JSON.stringify(j))
+    +'\n\nrega.switch отправлен: '+((j.sent||[]).join(', ')||'— (нет телефонов онлайн)')
+    +'\n⏳ отложено для офлайн: '+((j.queued||[]).join(', ')||'—'));
+  loadSched();
 }
-// ---------- 👥 группы (этап 4) ----------
+async function regaNow(){
+  if(regaGuarded())return;
+  if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → пауза 30с → rega.start\nпо завершении рега сама поднимет фарм'))return;
+  const r=await fetch('/api/rega/start',{method:'POST'});
+  const j=await r.json();
+  if(!j.ok){
+    show('❌ РЕГА НЕ ЗАПУЩЕНА: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
+      +'\nвсего фармеров известно: '+((j.farmers_total||[]).length));return}
+  show('🆕 РЕГА ЗАПУСКАЕТСЯ на: '+(j.farmers||[]).join(', ')+'\n\n'+j.note);
+}
+
+// ---------- 🌾 сбор / 🔁 цикл / ⏹ стоп ----------
+async function harvestNow(){
+  if(!confirm('Запустить СБОР УРОЖАЯ (HOLD)?\nфармеры зайдут в приватки с treid.lua и СИДЯТ там,\nпока ты не нажмёшь «🔁 НОВЫЙ ЦИКЛ».\n\nКуки/акки НЕ трогаются.'))return;
+  const r=await fetch('/api/harvest/start',{method:'POST'});
+  const j=await r.json();
+  if(!j.ok){
+    show('❌ СБОР НЕ ЗАПУЩЕН: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
+      +'\nсборщики онлайн: '+((j.collectors||[]).join(', ')||'—'));return}
+  show('🌾 СБОР ЗАПУСКАЕТСЯ (HOLD)\nфармеры: '+(j.farmers||[]).join(', ')+'\nсборщики: '+(j.collectors||[]).join(', ')+'\n\n'+j.note);
+}
+async function cycleNew(){
+  if(!confirm('🔁 НОВЫЙ ЦИКЛ?\n1) окно сбора снято у всех (выход из приваток)\n2) фарм ⏹\n3) рега акков ВКЛЮЧАЕТСЯ и запускается\n4) по завершении рега сама поставит фарм\n\nЭто единственный выход из HOLD-сбора.'))return;
+  const r=await fetch('/api/cycle/new',{method:'POST'});
+  const j=await r.json();
+  if(!j.ok){
+    show('❌ НОВЫЙ ЦИКЛ НЕ ЗАПУЩЕН: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
+      +'\nвсего известно: '+((j.farmers_total||[]).length));return}
+  show('🔁 НОВЫЙ ЦИКЛ запущен\nфармеры: '+(j.farmers||[]).join(', ')
+    +'\nrega.switch → '+(j.rega_switch_sent||[]).join(', ')+'\n\n'+j.note);
+}
+async function farmStopAll(){
+  if(!confirm('⏹ СТОП ФАРМ ВСЕМ?\nокно сбора снять + фарм ⏹ на всех онлайн.\nОфлайн/спящие телефоны получат команду при подключении (⏳).'))return;
+  const r=await fetch('/api/farm/stop',{method:'POST'});
+  const j=await r.json();
+  if(!j.ok){show('❌ '+j.note);return}
+  show('⏹ СТОП ФАРМ ВСЕМ\n✅ онлайн: '+((j.sent||[]).join(', ')||'—')
+    +'\n⏳ отложено офлайн: '+((j.queued||[]).join(', ')||'—')+'\n\n'+j.note);
+}
+async function cookieCheckAll(){
+  const r=await fetch('/api/cookie/check',{method:'POST'});
+  const j=await r.json();
+  show('🍪 проверка кук запущена на: '+((j.sent||[]).join(', ')||'— (нет фармеров онлайн)'));
+}
+
+// ---------- массовые ----------
+async function bcastPing(){
+  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'ping'})})).json();
+  show('📢 ping отправлен всем ('+(j.sent||0)+') · доставлено: '+((j.delivered||[]).length)
+    +(j.stale&&j.stale.length?'\n⚠️ связь уже тухлая: '+j.stale.join(', '):''));
+}
+async function bcastFarmStart(){
+  if(!confirm('Стартовать ФАРМ на ВСЕХ устройствах?'))return;
+  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'service.start',payload:{name:'farm'}})})).json();
+  show('🚜 farm start отправлен всем ('+(j.sent||0)+') · доставлено: '+((j.delivered||[]).length)
+    +(j.stale&&j.stale.length?'\n⚠️ связь тухлая: '+j.stale.join(', '):''));
+}
+async function bcastFarmStop(){
+  if(!confirm('Остановить ФАРМ на ВСЕХ устройствах?\n(окно сбора НЕ снимается — для полного стопа есть «⏹ СТОП ФАРМ ВСЕМ»)'))return;
+  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'service.stop',payload:{name:'farm'}})})).json();
+  show('🚜 farm stop отправлен всем ('+(j.sent||0)+') · доставлено: '+((j.delivered||[]).length)
+    +(j.stale&&j.stale.length?'\n⚠️ связь тухлая: '+j.stale.join(', '):''));
+}
+async function updAll(){
+  if(!confirm('Обновить ВСЕ устройства?'))return;
+  const j=await(await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({all:true})})).json();
+  show('⬆ update отправлен на '+(j.sent?j.sent.length:0)+' устройств\n'
+    +(j.sent||[]).map(s=>s.device_id).join(', '));
+}
+async function apkAll(){
+  if(!confirm('Скачать и установить APK на ВСЕ устройства?'))return;
+  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'task',task:'apk.update'})})).json();
+  show('⬇ apk.update отправлен на '+(j.sent?j.sent.length:0)+' устройств\nрезультат каждого: /api/results/<task_id>');
+}
+async function upd(d){
+  selected=d;
+  const j=await(await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({device_id:d})})).json();
+  if(!j.sent||!j.sent.length){show('❌ устройство офлайн');return}
+  show('⏳ обновление '+d+'...');
+  const res=await waitResult(j.sent[0].task_id,60000);
+  if(res)show('⬆ обновление '+d+' ✓\n'+JSON.stringify(res.data,null,2).slice(0,2500)+'\n\n♻️ клиент перезапускается сам');
+  else show('⏰ нет ответа (возможно, клиент уже перезапускается)');
+}
+
+// ---------- ⏳ отложенные команды ----------
+async function clearPending(){
+  if(!confirm('Снять ВСЕ отложенные команды?\n(офлайн-телефоны их больше НЕ получат)'))return;
+  await fetch('/api/pending',{method:'DELETE'});
+  show('🗑 отложенные команды сняты');
+  refresh();
+}
+function renderBanner(j){
+  const total=j.pending_total||0;
+  const b=$('banner');
+  if(!total){b.style.display='none';return}
+  b.style.display='block';
+  const pend=j.pending||{};
+  $('bannerList').innerHTML=Object.entries(pend)
+    .map(([d,tasks])=>'<b>'+d+'</b>: '+(tasks||[]).join(', ')).join('<br>');
+}
+
+// ---------- 👥 группы ----------
+function chk(id,on){on?checked.add(id):checked.delete(id)}
 async function loadGroups(){
   try{
     const j=await(await fetch('/api/groups')).json();
@@ -256,7 +401,7 @@ async function loadGroups(){
     (j.groups||[]).forEach(g=>GROUPS[g.name]=g.devices);
     const sel=$('groupSel'),cur=sel.value;
     sel.innerHTML='<option value="">— выбери группу —</option>'+Object.keys(GROUPS).sort()
-      .map(n=>`<option value="${n}">${n} (${GROUPS[n].length})</option>`).join('');
+      .map(n=>'<option value="'+n+'">'+n+' ('+GROUPS[n].length+')</option>').join('');
     if(cur&&GROUPS[cur])sel.value=cur;
     renderGroupInfo();
   }catch(e){}
@@ -267,7 +412,7 @@ function renderGroupInfo(){
 }
 async function saveGroup(){
   const devs=[...checked];
-  if(!devs.length){show('❌ поставь галочки «гр» на устройствах');return}
+  if(!devs.length){show('❌ поставь галочки слева от устройств');return}
   const name=prompt('Имя группы ('+devs.length+' шт.: '+devs.join(', ')+'):\n(существующее имя = замена состава)','');
   if(!name)return;
   const r=await fetch('/api/groups',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -291,7 +436,6 @@ async function groupAct(kind){
   const n=$('groupSel').value,members=GROUPS[n]||[];
   if(!n||!members.length){show('❌ выбери группу');return}
   if(!confirm(GLABEL[kind]+' → группа «'+n+'» ('+members.length+' шт.)?\n'+members.join(', ')))return;
-  show('⏳ '+GLABEL[kind]+' → '+members.length+' устройств...');
   const sent=[],offline=[];
   for(const id of members){
     try{
@@ -300,99 +444,40 @@ async function groupAct(kind){
           body:JSON.stringify({device_id:id})})).json();
         (j.sent&&j.sent.length)?sent.push(id):offline.push(id);
       }else{
-        const r=await fetch(`/api/devices/${id}/send`,{method:'POST',headers:{'Content-Type':'application/json'},
+        const r=await fetch('/api/devices/'+id+'/send',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({type:'task',...GTASKS[kind]})});
         r.ok?sent.push(id):offline.push(id);
       }
     }catch(e){offline.push(id)}
   }
-  show(GLABEL[kind]+' группе «'+n+'»: '+sent.length+'/'+members.length+'\n\n'
-    +'✅ отправлено: '+(sent.join(', ')||'—')+'\n❌ офлайн: '+(offline.join(', ')||'—'));
-}
-// ---------- массовые ----------
-async function upd(d){
-  selected=d;
-  const j=await(await fetch('/api/update',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:d})})).json();
-  if(!j.sent||!j.sent.length){show('❌ устройство офлайн');return}
-  show('⏳ обновление...');
-  const res=await waitResult(j.sent[0].task_id,60000);
-  if(res)show('обновление ✓\n\n'+JSON.stringify(res.data,null,2).slice(0,3000)
-    +'\n\n♻️ клиент перезапускается — ● мигнёт и вернётся');
-  else show('⏰ нет ответа (возможно, клиент уже перезапускается)');
-}
-async function updAll(){
-  if(!confirm('Обновить ВСЕ устройства?'))return;
-  const j=await(await fetch('/api/update',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({all:true})})).json();
-  show('📢 update отправлен на '+(j.sent?j.sent.length:0)+' устройств\n\n'
-    +(j.sent||[]).map(s=>s.device_id+': '+s.task_id).join('\n'));
-}
-async function bcast(){
-  await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type:'task',task:'ping'})});
-  show('отправлено всем');
-}
-async function bcastFarmStart(){
-  if(!confirm('Стартовать ФАРМ на ВСЕХ устройствах?'))return;
-  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type:'task',task:'service.start',payload:{name:'farm'}})})).json();
-  show('🚜 farm start отправлен всем ('+(j.sent||0)+' шт.)\n\nпосле старта проверь farm.log');
-}
-async function bcastFarmStop(){
-  if(!confirm('Остановить ФАРМ на ВСЕХ устройствах?'))return;
-  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type:'task',task:'service.stop',payload:{name:'farm'}})})).json();
-  show('🚜 farm stop отправлен всем ('+(j.sent||0)+' шт.)');
-}
-async function apkAll(){
-  if(!confirm('Скачать и установить APK на ВСЕ устройства?\nссылки: link-apps · при обновлении версии телефон сам перезагрузится'))return;
-  const j=await(await fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type:'task',task:'apk.update'})})).json();
-  show('📲 apk.update отправлен на '+(j.sent?j.sent.length:0)+' устройств\n\n'
-    +(j.sent||[]).map(s=>s.device_id+': '+s.task_id).join('\n')
-    +'\n\nрезультат каждого: /api/results/<task_id>\nпри реальном обновлении телефон перезагрузится сам');
-}
-// ---------- ⏰ расписание (рега + сбор) ----------
-window._regaEnabled = null;   // состояние kill-switch (null = ещё не знаем)
-
-function renderRegaSw(){
-  const b=$('regaSw');
-  if(window._regaEnabled===null){b.textContent='🆕 Рега акков: ?';b.style.background='#2a6';$('regaSwNote').textContent='';return}
-  if(window._regaEnabled){
-    b.textContent='🆕 Рега акков: ВКЛ ⚠️';b.style.background='#c93';
-    $('regaSwNote').textContent='регистрация ИДЁТ — акки с лутом могут быть перезаписаны!';
-  }else{
-    b.textContent='🆕 Рега акков: ВЫКЛ 🛡';b.style.background='#a33';
-    $('regaSwNote').textContent='🛡 безопасный режим — акки с лутом защищены';
-  }
+  show(GLABEL[kind]+' группе «'+n+'»: '+sent.length+'/'+members.length+'\n'
+    +'✅ '+(sent.join(', ')||'—')+'\n❌ офлайн: '+(offline.join(', ')||'—'));
 }
 
-async function regaSwitch(){
-  const target=!(window._regaEnabled===true);
-  if(target){
-    if(!confirm('ВКЛЮЧИТЬ регу акков?\nТелефоны снова начнут регистрировать НОВЫЕ акки — куки на клонах будут перезаписываться!\nАкки с лутом могут потеряться.'))return;
-  }else{
-    if(!confirm('ОТКЛЮЧИТЬ регу акков (безопасный режим)?\nАвторегистрация и замена кук остановятся на ВСЕХ телефонах — акки с лутом защищены.\nФарм и СБОР продолжат работать.'))return;
-  }
-  const r=await fetch('/api/rega/switch',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:target})});
+// ---------- 📅 события ----------
+function fmtTs(ts){return new Date(ts*1000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function renderEvents(j){
+  $('evList').innerHTML=j.events.map(e=>{
+    const inf=Object.entries(e.info||{}).map(([k,v])=>k+'='+v).join(' ');
+    return '<div class="evrow">'+fmtTs(e.ts)+'  <b>'+e.device_id+'</b>  '+e.type+(inf?'  <span class="mut">('+inf+')</span>':'')+'</div>';
+  }).join('')||'пока событий нет';
+}
+async function showEvents(){
+  const r=await fetch('/api/events?limit=200');
   const j=await r.json();
-  window._regaEnabled=!!j.rega_enabled;renderRegaSw();
-  show((j.ok?'🛡 Килл-свитч регы переключён:\n':'❌ ')+(j.note||JSON.stringify(j))
-    +'\n\nотправлено rega.switch на: '+((j.sent||[]).join(', ')||'— (нет телефонов онлайн)')
-    +'\nофлайн-телефоны догонят состояние при следующем подключении');
-  loadSched();
+  renderEvents(j);
+  show('📅 событий: '+j.count+' (список — в блоке «События фарма» выше)');
 }
-
-function regaGuarded(){
-  if(window._regaEnabled===false){
-    show('🛡 РЕГА АККОВ ВЫКЛЮЧЕНА (безопасный режим) — акки с лутом защищены.\n\nРегистрация НЕ идёт: ни по кнопке, ни по расписанию, ни автоматически при нехватке кук на телефонах.\n\nВключить: тумблер «🆕 Рега акков» в блоке расписания ниже.');
-    return true;
-  }
-  return false;
+async function clearEvents(){
+  if(!confirm('Очистить ВСЮ историю событий?'))return;
+  await fetch('/api/events',{method:'DELETE'});
+  $('evList').innerHTML='';
+  show('🗑 история событий очищена');
 }
+function ev(d){selected=d;fetch('/api/events?limit=100&device_id='+encodeURIComponent(d))
+  .then(r=>r.json()).then(j=>{renderEvents(j);show('📅 события '+d+' (в блоке «События фарма»)')})}
 
+// ---------- ⏰ расписание ----------
 async function loadSched(){
   try{
     const r=await fetch('/api/schedule');
@@ -405,12 +490,14 @@ async function loadSched(){
     $('checkMin').value=s.cookie_check_interval_min||30;
     $('hwPlace').value=s.harvest_place_id||'';
     if(window._regaEnabled!==!!s.rega_enabled){window._regaEnabled=!!s.rega_enabled;renderRegaSw()}
+    window._harvestRunning=!!j.harvest_running;
     const st=j.state||{};
     const on=j.farmers_online||[],tot=j.farmers_total||[];
     $('schedState').textContent='· последняя рега: '+(st.last_rega||'—')
       +' · последний сбор: '+(st.last_harvest||'—')
+      +(window._harvestRunning?' · 🌾 СБОР ИДЁТ (HOLD)':'')
       +(st.rega_pending&&st.rega_pending.length?' · 🆕 рега идёт: '+st.rega_pending.join(','):'')
-      +' · фармеры онлайн: '+on.length+'/'+tot.length+(on.length?' ('+on.join(',')+')':'')
+      +' · фармеры онлайн: '+on.length+'/'+tot.length
       +' · сборщики: '+(j.collectors_online||[]).length+'/'+(j.collectors_total||[]).length
       +(window._regaEnabled===false?' · 🛡 рега ВЫКЛ (safe)':'');
   }catch(e){$('schedState').textContent='· сервер недоступен'}
@@ -424,128 +511,107 @@ async function saveSched(){
     harvest_place_id:$('hwPlace').value.trim()};
   const tt=/^([0-1][0-9]|2[0-3]):[0-5][0-9]$/;
   if(!tt.test(body.rega_time)||!tt.test(body.harvest_time)){
-    show('❌ время должно быть ЧЧ:ММ, например 03:00 (часы 00–23, минуты 00–59)');return}
+    show('❌ время должно быть ЧЧ:ММ, например 03:00');return}
   const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)});
-  show(r.ok?'⏰ расписание сохранено:\n'+JSON.stringify(await r.json(),null,2):'❌ '+await r.text());
+  show(r.ok?'⏰ расписание сохранено':'❌ '+await r.text());
   loadSched();
 }
-async function regaNow(){
-  if(regaGuarded())return;
-  if(!confirm('Запустить РЕГУ сейчас на всех онлайн-фармерах?\nfarm ⏹ → рега (20 попыток, отдых 15 мин после каждых 10) → фарм сам вернётся\nслучайно запущенные клоны во время реги закрываются автоматически'))return;
-  const r=await fetch('/api/rega/start',{method:'POST'});
-  const j=await r.json();
-  if(!j.ok){
-    show('❌ РЕГА НЕ ЗАПУЩЕНА: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
-      +'\nвсего фармеров известно: '+((j.farmers_total||[]).length)
-      +'\n\nподключи телефоны (или подожди) — статус в шапке блока обновляется сам');return}
-  show('🆕 РЕГА ЗАПУСКАЕТСЯ на: '+(j.farmers||[]).join(', ')+'\n\n'+j.note
-      +'\n\nстатус: «рега идёт» в шапке блока + события rega.* в 📅');
-}
-async function harvestNow(){
-  if(!confirm('Запустить СБОР УРОЖАЯ сейчас?\n🛡 безопасный трейд: фармеры зайдут в приватки из id.txt с treid.lua (масс-трейд лута целям)\n2 пачки по '+$('batchMin').value+' мин (фармеры пополам) + сборщикам 90с head-start\n\nКуки/акки НЕ трогаются. Нет сборщиков онлайн — трейд встанет в ожидание, лут НЕ потеряется'))return;
-  const r=await fetch('/api/harvest/start',{method:'POST'});
-  const j=await r.json();
-  if(!j.ok){
-    show('❌ СБОР НЕ ЗАПУЩЕН: '+j.note+'\n\nфармеры онлайн: '+((j.farmers||[]).join(', ')||'—')
-      +'\nсборщики онлайн: '+((j.collectors||[]).join(', ')||'—')
-      +'\n\nподключи телефоны (или подожди) — статус в шапке блока обновляется сам');return}
-  show('🌾 СБОР ЗАПУСКАЕТСЯ\nфармеры: '+(j.farmers||[]).join(', ')+'\nсборщики: '+(j.collectors||[]).join(', ')+'\n\n'+j.note);
-}
-async function cookieCheckAll(){
-  const r=await fetch('/api/cookie/check',{method:'POST'});
-  const j=await r.json();
-  show('🍪 проверка кук запущена на: '+((j.sent||[]).join(', ')||'— (нет фармеров онлайн)'));
-}
+
 // ---------- 🍪 пул кук ----------
-let POOL={pool:[],archive:[]};
-function pbBadge(e,isArch){
-  if(isArch)return'<span class="pbadge pb-arch">архив</span>';
-  const busy=e.claimed_by&&e.claimed_ts&&(Date.now()/1000-e.claimed_ts<2700);
-  return busy?'<span class="pbadge pb-busy">🔒 '+e.claimed_by+'</span>'
-             :'<span class="pbadge pb-free">свободна</span>';
-}
 async function loadPool(){
   try{
     const j=await(await fetch('/api/pool')).json();
-    POOL=j;
     const c=j.counts||{};
     $('poolCounts').textContent='· в пуле: '+((c.pool||{}).total||0)
       +' (свободно '+((c.pool||{}).free||0)+', в работе '+((c.pool||{}).busy||0)+')'
-      +' · 🗑 архива нет (v0.8)';
-    const row=(e)=>`<div class="poolrow">
-      <span class="mut">#${e.id}</span> <b>${e.nick||'?'}</b>
-      ${pbBadge(e,false)}
-      <span class="mut">${(e.cookie||'').slice(0,28)}… · ${e.source||''} · ${e.added_ts?new Date(e.added_ts*1000).toLocaleDateString('ru-RU'):''}</span>
-      <button class="r" onclick="poolDel(${e.id})">✖</button>
-      </div>`;
-    $('poolList').innerHTML='<b>Пул</b>'+((j.pool||[]).map(e=>row(e)).join('')||'<span class="mut">пусто</span>');
+      +' · архива нет';
+    const row=(e)=>'<div class="poolrow"><span class="mut">#'+e.id+'</span> <b>'+(e.nick||'?')+'</b> '
+      +(e.claimed_by&&e.claimed_ts&&(Date.now()/1000-e.claimed_ts<2700)
+        ?'<span class="pbadge">🔒 '+e.claimed_by+'</span>':'<span class="mut">свободна</span>')
+      +' <span class="mut">'+(e.cookie||'').slice(0,24)+'… · '+(e.source||'')+'</span>'
+      +' <button class="r" onclick="poolDel('+e.id+')">✖</button></div>';
+    $('poolList').innerHTML='<b>Пул</b>'+((j.pool||[]).map(row).join('')||' <span class="mut">пусто</span>');
   }catch(e){$('poolCounts').textContent='сервер недоступен'}
 }
-async function poolAddTo(toArchive){
+async function poolAdd(){
   const text=$('poolText').value.trim();
   if(!text){show('❌ вставь куки в поле (nick:/pass:/.ROBLOSECURITY=... или токены построчно)');return}
   const r=await fetch('/api/pool/add',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text,to:toArchive?'archive':'pool'})});
+    body:JSON.stringify({text:text})});
   const j=await r.json();
-  show(r.ok?'🍪 добавлено: '+j.added+'\n'+JSON.stringify(j.counts,null,2):'❌ '+await r.text());
+  show(r.ok?'🍪 добавлено: '+j.added:'❌ '+await r.text());
   if(r.ok){$('poolText').value='';loadPool()}
 }
-function poolAdd(){poolAddTo(false)}
-function poolAddArchive(){poolAddTo(true)}
 async function poolDel(id){
   if(!confirm('Удалить куку #'+id+' НАСОВСЕМ?'))return;
   await fetch('/api/pool/delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({ids:[id]})});
   loadPool();
 }
-async function poolMove(id,to){
-  await fetch('/api/pool/move',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ids:[id],to:to})});
-  loadPool();
+
+// ---------- 📱 таблица устройств ----------
+function devRow(d){
+  const bat=(d.info&&d.info.battery!=null)?d.info.battery:'?';
+  const model=(d.info&&d.info.model)?d.info.model:'?';
+  const sel=selected===d.device_id?' class="sel"':'';
+  const gb=(d.groups||[]).map(g=>'<span class="gbadge">👥'+g+'</span>').join('');
+  const pend=(d.pending&&d.pending.length)?' <span class="pbadge" title="'+d.pending.join(', ')+'">⏳'+d.pending.length+'</span>':'';
+  const id=d.device_id;
+  const q="'";
+  const btns=[
+    ['ping',        'ping(selected)'],
+    ['статус',      'st(selected)','b'],
+    ['farm ▶',      'farmOn(selected)'],
+    ['farm ⏹',      'farmOff(selected)','r'],
+    ['🔓',          'bypassSel(selected)','b'],
+    ['🆕',          'regaDev(selected)',''],
+    ['🌾⏹',        'harvestOff(selected)','r'],
+    ['farm.log',    'farmLog(selected)','b'],
+    ['state',       'farmState(selected)','b'],
+    ['🍪',          'cookieCheck(selected)','b'],
+    ['📅',          'ev(selected)','b'],
+    ['♻️',          'restartCli(selected)','g'],
+    ['⛔',          'haltCli(selected)','r'],
+    ['⬇ APK',       'apk(selected)','u'],
+    ['⬆',           'upd(selected)','u'],
+    ['exec',        'exe(selected)','b'],
+    ['demo ▶',      'demoOn(selected)'],
+    ['demo ⏹',      'demoOff(selected)','r'],
+    ['лог',         'demoLog(selected)','b']
+  ].map(b=>'<button class="'+(b[2]||'')+'" onclick="'+b[1].replace(/selected/g,"'"+id+"'")+'">'+b[0]+'</button>').join('');
+  return '<tr'+sel+' onclick="devClick(\''+id+'\')">'
+    +'<td><input type="checkbox" class="chk" '+(checked.has(id)?'checked':'')
+    +' onclick="event.stopPropagation()" onchange="chk(\''+id+'\',this.checked)"></td>'
+    +'<td>'+id+(id.startsWith('collector-')?' <span class="gbadge">📦 сборщик</span>':'')
+    +' '+(d.online?'<span class="on">●</span>':'<span class="off">●</span>')+gb+pend+'</td>'
+    +'<td>'+model+'</td><td>'+bat+'%</td><td>'+keyAge(d)+'</td><td>'+(d.client_version||'?')+'</td>'
+    +'<td>'+(d.uptime_sec!=null?Math.round(d.uptime_sec/60)+'м':'—')+'</td>'
+    +'<td>'+(d.last_seen_sec!=null?d.last_seen_sec+'с':'офлайн')+'</td>'
+    +'<td>'+btns+'</td></tr>';
 }
-function chk(id,on){on?checked.add(id):checked.delete(id)}
+function devClick(id){selected=id;refresh()}
+function regaDev(d){
+  if(regaGuarded())return;
+  if(!confirm('🆕 Рег акков на '+d+'?\n⚠️ Куки на этом телефоне будут ПЕРЕЗАПИСАНЫ!'))return;
+  selected=d;run(selected,{type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
+}
 async function refresh(){
   try{
     const j=await(await fetch('/api/devices')).json();
-    $('summary').textContent='устройств: '+j.count+(selected?' | выбрано: '+selected:'')
-      +(checked.size?' | в группе: '+checked.size:'');
-    $('selInfo').textContent=selected?(' → выбрано: '+selected+' — жми кнопку')
-      :' — кликни по устройству в таблице, потом жми кнопку';
-    $('rows').innerHTML=j.devices.map(d=>{
-      const bat=(d.info&&d.info.battery!=null)?d.info.battery:'?';
-      const model=(d.info&&d.info.model)?d.info.model:'?';
-      const sel=selected===d.device_id?' class="sel"':'';
-      const gb=(d.groups||[]).map(g=>`<span class="gbadge">👥${g}</span>`).join('');
-      return `<tr${sel} onclick="selected='${d.device_id}'">
-        <td><input type="checkbox" class="chk" ${checked.has(d.device_id)?'checked':''}
-             onclick="event.stopPropagation()" onchange="chk('${d.device_id}',this.checked)"></td>
-        <td>${d.device_id}${d.device_id.startsWith('collector-')?' <span class="gbadge">📦 сборщик</span>':''} ${d.online?'<span class="on">●</span>':'<span class="off">●</span>'}${gb}</td>
-        <td>${model}</td><td>${bat}%</td><td>${keyAge(d)}</td><td>${d.client_version||'?'}</td>
-        <td>${Math.round(d.uptime_sec/60)}м</td><td>${d.last_seen_sec}с</td>
-        <td><button onclick="ping('${d.device_id}')">ping</button>
-            <button class="b" onclick="exe('${d.device_id}')">exec</button>
-            <button class="b" onclick="st('${d.device_id}')">статус</button>
-            <button onclick="demoOn('${d.device_id}')">demo ▶</button>
-            <button class="r" onclick="demoOff('${d.device_id}')">demo ⏹</button>
-            <button class="b" onclick="demoLog('${d.device_id}')">лог</button>
-            <button onclick="farmOn('${d.device_id}')">farm ▶</button>
-            <button class="r" onclick="farmOff('${d.device_id}')">farm ⏹</button>
-            <button style="background:#a4a" title="БАЙПАС" onclick="bypassSel('${d.device_id}')">🔓</button>
-            <button title="Рег акков" onclick="rega('${d.device_id}')">🆕</button>
-            <button title="Сбор старт" onclick="harvestOn('${d.device_id}')">🌾▶</button>
-            <button class="r" title="Сбор стоп" onclick="harvestOff('${d.device_id}')">🌾⏹</button>
-            <button class="b" onclick="farmLog('${d.device_id}')">farm.log</button>
-            <button class="b" onclick="farmState('${d.device_id}')">state</button>
-            <button class="b" onclick="cookieCheck('${d.device_id}')">🍪</button>
-            <button class="b" onclick="ev('${d.device_id}')">📅</button>
-            <button class="g" title="Restart клиента" onclick="restartCli('${d.device_id}')">♻️</button>
-            <button class="r" title="Halt" onclick="haltCli('${d.device_id}')">⛔</button>
-            <button class="u" onclick="apk('${d.device_id}')">⬇ APK</button>
-            <button class="u" onclick="upd('${d.device_id}')">⬆</button></td></tr>`;
-    }).join('')||'<tr><td colspan="9" class="mut">нет устройств</td></tr>';
-  }catch(e){$('summary').textContent='сервер недоступен'}
+    renderBanner(j);
+    $('rows').innerHTML=j.devices.map(devRow).join('')||'<tr><td colspan="9" class="mut">нет устройств — подключи телефоны (bootstrap.py)</td></tr>';
+    $('summary').textContent='устройств: '+j.count
+      +(selected?' · выбрано: '+selected:'')
+      +(checked.size?' · в группе: '+checked.size:'')
+      +(j.pending_total?' · ⏳ отложенных: '+j.pending_total:'');
+  }catch(e){$('summary').textContent='сервер недоступен — проверь, что main.py запущен на сервере'}
 }
-setInterval(refresh,3000);refresh();loadGroups();setInterval(loadGroups,15000);
-loadSched();setInterval(loadSched,15000);loadPool();setInterval(loadPool,20000);
+
+// ---------- автопollen ----------
+refresh();loadGroups();loadSched();loadPool();
+setInterval(refresh,3000);
+setInterval(loadGroups,15000);
+setInterval(loadSched,15000);
+setInterval(loadPool,20000);
 </script></body></html>

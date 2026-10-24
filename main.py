@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.11
+🚜 Farm Server v0.12
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
@@ -10,7 +10,20 @@
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
 - /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
 - /api/pending             ⏳ отложенные команды (посмотреть/снять)
-- /                        дашборд (dashboard.html)
+- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.2) — всё на одной странице,
+                           без отдельных меню: главные кнопки + устройства + расписание
+                           + пул кук + группы + события. Других адресов (типа :3000) НЕТ.
+
+v0.12 — «ВСЁ ПУСТЬ БУДЕТ НА :55019 БЕЗ ОТДЕЛЬНЫХ МЕНЮ» (хозяин):
+  • 🖥 dashboard.html переписан в ЕДИНУЮ панель v1.2: главные кнопки
+    (СБОР/НОВЫЙ ЦИКЛ/СТОП ФАРМ ВСЕМ/РЕГА СЕЙЧАС/тумблер регы) прямо сверху,
+    ниже — устройства, расписание, пул кук, группы, события, журнал.
+    Баннер «иди на :3000» УДАЛЕН — Next.js-панель на :3000 сквозь portmap-туннель
+    всё равно недостижима (проброшен только порт 8000), из-за этого и было
+    «кнопки не работают»: хозяин открывал дашборд-заглушку.
+  • 🖥 GET / отдаёт панель с Cache-Control: no-store — после обновления кода
+    браузер больше не показывает старую версию из кэша.
+  • 📡 /api/schedule отдаёт harvest_running (индикатор HOLD-сбора в панели).
 
 v0.11 — «СТОП ФАРМ ВСЕМ НЕ РАБОТАЕТ / КНОПКИ ДЛЯ ВСЕХ НИЧЕГО НЕ ДЕЛАЮТ» (хозяин):
   • ⏳ ГЛАВНОЕ: команды «для всех» (Стоп фарм всем, тумблер регы) уходили ТОЛЬКО
@@ -1185,6 +1198,7 @@ async def _startup():
 @app.get("/api/schedule")
 async def api_schedule_get():
     return {"schedule": load_schedule(), "state": load_sched_state(),
+            "harvest_running": _HARVEST_RUNNING,   # 🖥 v0.12: индикатор HOLD-сбора для панели
             "farmers_online": farmers_online(), "collectors_online": collectors_online(),
             "farmers_total": farmers_total(), "collectors_total": collectors_total()}
 
@@ -1384,9 +1398,12 @@ async def api_cookie_check():
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
+    """🖥 v0.12: ЕДИНАЯ панель (всё на одной странице, без отдельных меню).
+    no-store — чтобы после git pull браузер не показал старую панель из кэша."""
     if not DASHBOARD_FILE.is_file():
         return HTMLResponse("<h1>dashboard.html не найден в ~/farm-server/</h1>", status_code=500)
-    return HTMLResponse(DASHBOARD_FILE.read_text(encoding="utf-8"))
+    return HTMLResponse(DASHBOARD_FILE.read_text(encoding="utf-8"),
+                        headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 if __name__ == "__main__":
