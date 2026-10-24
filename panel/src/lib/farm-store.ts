@@ -1,13 +1,24 @@
 "use client";
 
 import { create } from "zustand";
+import { toast } from "sonner";
 import type { FarmCallResult } from "@/lib/farm-types";
 
 const BASE_KEY = "farm_base_url";
 
-// Дефолт: сервер фермы на той же машине (превью/локальный запуск).
-// Меняется в шапке панели и сохраняется в localStorage.
-const DEFAULT_BASE = "http://127.0.0.1:8000";
+// 🆑 v1.0: дефолтный адрес — ТОТ ЖЕ ХОСТ, с которого открыта панель (панель обычно
+// запускают на одной машине с Farm Server). Раньше дефолт был жёстко 127.0.0.1:8000 —
+// если панель открыть с телефона/другого ПК, 127.0.0.1 указывал на САМО устройство
+// пользователя, сервер «не отвечал», health=down и ВСЕ кнопки были заблокированы
+// («кнопки не работают»). Теперь подставляется хост из адресной строки.
+function detectDefaultBase(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:8000";
+  const h = window.location.hostname;
+  if (!h || h === "localhost" || h === "127.0.0.1") return "http://127.0.0.1:8000";
+  return `http://${h}:8000`;
+}
+
+const DEFAULT_BASE = detectDefaultBase();
 
 export function loadBase(): string {
   if (typeof window === "undefined") return "";
@@ -62,6 +73,10 @@ type FarmState = {
     timeout?: number;
     busyKey?: string;
     waitSec?: number; // сколько секунд ждать результат телефона (0 = не ждать)
+    /** 🆑 v1.0: "background" (по умолчанию) — ответить СРАЗУ после отправки,
+     *  результат телефона догонит тостом + записью в журнал; "inline" — ждать
+     *  результат здесь (exec/чтение логов — нужен вывод в диалоге). */
+    mode?: "inline" | "background";
   }) => Promise<FarmCallResult>;
   call: <T = unknown>(opts: {
     label: string;
@@ -78,6 +93,70 @@ type FarmState = {
 };
 
 let logId = 1;
+
+// 🆑 v1.0: общий цикл ожидания результата телефона. Используется в двух режимах:
+//  • background (дефолт) — запускается «в воздух», НЕ блокирует кнопку и тост:
+//    пользователь сразу видит «отправлено», а когда телефон ответит — прилетит
+//    тост «✅ Результат» + запись в журнал. Раньше всё это ждало ДО 30–60с
+//    в самом обработчике кнопки → «кнопка не работает / очень долго отвечает».
+//  • inline — exec/чтение логов: результат нужен в диалоге, ждём синхронно.
+async function pollForResult(
+  taskId: string,
+  label: string,
+  waitSec: number,
+): Promise<unknown | null> {
+  const deadline = Date.now() + waitSec * 1000;
+  while (Date.now() < deadline) {
+    // 3с между опросами — результат обычно приходит за секунды
+    await new Promise((r) => setTimeout(r, 3000));
+    const rr = await useFarm.getState().call<{ status: string; data?: unknown }>({
+      label: `⏳ ожидание результата ${taskId}`,
+      method: "GET",
+      path: `/api/results/${taskId}`,
+      silent: true,
+    });
+    if (rr.ok && rr.data && (rr.data as { status?: string }).status === "done") {
+      const data = (rr.data as { data?: unknown }).data ?? rr.data;
+      useFarm.setState((s) => ({
+        log: [
+          {
+            id: logId++,
+            ts: Date.now(),
+            label: `✅ Результат: ${label}`,
+            target: `result ${taskId}`,
+            ok: true,
+            ms: null,
+            status: 200,
+            result: data,
+          },
+          ...s.log,
+        ].slice(0, 300),
+      }));
+      toast.success(`✅ ${label}`, { description: "телефон ответил — подробности в журнале" });
+      return data;
+    }
+  }
+  useFarm.setState((s) => ({
+    log: [
+      {
+        id: logId++,
+        ts: Date.now(),
+        label: `⏳ Результат не пришёл за ${waitSec}с: ${label}`,
+        target: `result ${taskId}`,
+        ok: false,
+        ms: null,
+        status: null,
+        result: null,
+        error: `телефон не ответил за ${waitSec}с — задача ещё может выполниться; проверь вкладку «Результат» (task_id=${taskId}) или журнал`,
+      },
+      ...s.log,
+    ].slice(0, 300),
+  }));
+  toast.warning(`⏳ ${label}`, {
+    description: `телефон не ответил за ${waitSec}с — задача ещё может выполниться`,
+  });
+  return null;
+}
 
 // 🆑 v0.9: дедупликация одновременных одинаковых GET-опросов. Раньше каждые 5с
 // уходил новый /api/devices даже пока висел предыдущий (сервер медленный/недоступен
@@ -155,54 +234,21 @@ export const useFarm = create<FarmState>((set, get) => ({
     }
 
     const waitSec = opts.waitSec ?? 0;
+    const mode = opts.mode || "background";
     if (!taskIds.length || waitSec <= 0 || taskIds.length > 1) return res;
 
     const taskId = taskIds[0];
-    const deadline = Date.now() + waitSec * 1000;
-    while (Date.now() < deadline) {
-      // 🆑 v0.9: 3с вместо 2с — меньше давления на прокси при длинных ожиданиях
-      await new Promise((r) => setTimeout(r, 3000));
-      const rr = await call<{ status: string; data?: unknown }>({
-        label: `⏳ ожидание результата ${taskId}`,
-        method: "GET",
-        path: `/api/results/${taskId}`,
-        silent: true,
-      });
-      if (rr.ok && rr.data && (rr.data as { status?: string }).status === "done") {
-        set((s) => ({
-          log: [
-            {
-              id: logId++,
-              ts: Date.now(),
-              label: `✅ Результат: ${opts.label}`,
-              target: `result ${taskId}`,
-              ok: true,
-              ms: null,
-              status: 200,
-              result: (rr.data as { data?: unknown }).data ?? rr.data,
-            },
-            ...s.log,
-          ].slice(0, 300),
-        }));
-        return { ...res, data: (rr.data as { data?: unknown }).data ?? res.data };
-      }
+
+    // 🆑 v1.0: background (дефолт) — НЕ держим обработчик кнопки: тост
+    // «отправлено» вылетает мгновенно, результат телефона догонит тостом
+    // «✅ Результат» и записью в журнал. inline — ждём (exec/логи).
+    if (mode === "background") {
+      void pollForResult(taskId, opts.label, waitSec);
+      return res;
     }
-    set((s) => ({
-      log: [
-        {
-          id: logId++,
-          ts: Date.now(),
-          label: `⏳ Результат не пришёл за ${waitSec}с: ${opts.label}`,
-          target: `result ${taskId}`,
-          ok: false,
-          ms: null,
-          status: null,
-          result: null,
-          error: `телефон не ответил за ${waitSec}с — задача ещё может выполниться; проверь вкладку «Результат» (task_id=${taskId}) или журнал`,
-        },
-        ...s.log,
-      ].slice(0, 300),
-    }));
+
+    const data = await pollForResult(taskId, opts.label, waitSec);
+    if (data !== null) return { ...res, data };
     return res;
   },
 

@@ -152,9 +152,11 @@ export function FunctionsPanel() {
     if (!res.ok) {
       toast.error(`${label}: не отправлено`, { description: res.error || undefined });
     } else {
-      const d = res.data as { pong?: boolean; sent?: number } | null;
+      const d = res.data as { sent?: number } | null;
+      // 🆑 v1.0: тост вылетает СРАЗУ после отправки (sendTask больше не ждёт
+      // результат телефона перед возвратом) — результат догонит тостом «✅»
       toast.success(
-        `${label}: ${d?.pong ? "pong ✓" : typeof d?.sent === "number" ? `отправлено ${d.sent}` : "отправлено"}`,
+        `${label}: ${typeof d?.sent === "number" ? `отправлено ${d.sent}` : "отправлено ✓"}`,
       );
     }
     return res;
@@ -163,6 +165,8 @@ export function FunctionsPanel() {
   // ---------- 🔓 БАЙПАС (принудительный): сброс кулдауна → фарм ⏹ → ▶ ----------
   async function forceBypass() {
     toast.info(`Байпас ${tgt}: шаг 1/3 — сброс кулдауна ключа`);
+    // 🆑 v1.0: шаги байпаса — inline: клиент выполняет задачи ПАРАЛЛЕЛЬНО,
+    // поэтому ждём завершения каждого шага, иначе фарм ▶ может обогнать фарм ⏹
     await sendTask({
       label: `Байпас 1/3: сброс кулдауна → ${tgt}`,
       deviceId: target,
@@ -170,6 +174,7 @@ export function FunctionsPanel() {
       payload: { command: RESET_KEY_CMD, timeout: 20 },
       busyKey: `bypass:${target}`,
       waitSec: 25,
+      mode: "inline",
     });
     await sleep(2000);
     toast.info(`Байпас ${tgt}: шаг 2/3 — фарм ⏹ (закрывает роблоксы)`);
@@ -180,6 +185,7 @@ export function FunctionsPanel() {
       payload: { name: "farm" },
       busyKey: `bypass:${target}`,
       waitSec: 30,
+      mode: "inline",
     });
     await sleep(3000);
     toast.info(`Байпас ${tgt}: шаг 3/3 — фарм ▶ (кулдаун 0 → байпас сразу)`);
@@ -190,6 +196,7 @@ export function FunctionsPanel() {
       payload: { name: "farm" },
       busyKey: `bypass:${target}`,
       waitSec: 20,
+      mode: "inline",
     });
     if (res.ok) toast.success(`Байпас ${tgt}: запущен, смотри 📅 События (bypass.*)`);
   }
@@ -218,6 +225,7 @@ export function FunctionsPanel() {
       busyKey: "exec",
       waitSec: 45,
       timeout: 20,
+      mode: "inline", // вывод нужен в диалоге — ждём результат здесь
     });
     if (res.ok) {
       const d = res.data as { output?: string; ok?: boolean; error?: string } | null;
@@ -241,6 +249,7 @@ export function FunctionsPanel() {
       payload: { path: logPath.trim(), tail: 4000 },
       busyKey: "file",
       waitSec: 25,
+      mode: "inline", // содержимое файла нужно в диалоге
     });
     if (res.ok) {
       const d = res.data as { content?: string; error?: string } | null;

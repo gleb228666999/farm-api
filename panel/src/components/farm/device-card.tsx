@@ -102,7 +102,7 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
       timeout: 20,
     });
     if (!res.ok) toast.error(`${label}: не отправлено`, { description: res.error || undefined });
-    else toast.success(`${label}: отправлено`);
+    else toast.success(`${label}: отправлено ✓`);
     return res;
   }
 
@@ -110,6 +110,8 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
 
   async function forceBypass() {
     toast.info(`Байпас ${id}: шаг 1/3 — сброс кулдауна ключа`);
+    // 🆑 v1.0: шаги байпаса — inline: клиент выполняет задачи ПАРАЛЛЕЛЬНО,
+    // поэтому ждём завершения каждого шага, иначе фарм ▶ может обогнать фарм ⏹
     await sendTask({
       label: `Байпас 1/3: сброс кулдауна (${id})`,
       deviceId: id,
@@ -117,6 +119,7 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
       payload: { command: RESET_KEY_CMD, timeout: 20 },
       busyKey: `bypass:${id}`,
       waitSec: 25,
+      mode: "inline",
     });
     await sleep(2000);
     toast.info(`Байпас ${id}: шаг 2/3 — фарм ⏹ (закрывает роблоксы)`);
@@ -127,6 +130,7 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
       payload: { name: "farm" },
       busyKey: `bypass:${id}`,
       waitSec: 30,
+      mode: "inline",
     });
     await sleep(3000);
     toast.info(`Байпас ${id}: шаг 3/3 — фарм ▶ (кулдаун 0 → байпас сразу)`);
@@ -137,6 +141,7 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
       payload: { name: "farm" },
       busyKey: `bypass:${id}`,
       waitSec: 20,
+      mode: "inline",
     });
     if (res.ok) toast.success(`Байпас ${id}: фарм перезапущен, смотри 📅 События (bypass.*)`);
   }
@@ -167,6 +172,7 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
       busyKey: "exec",
       waitSec: 45,
       timeout: 20,
+      mode: "inline", // вывод нужен в диалоге
     });
     if (res.ok) {
       const d = res.data as { output?: string; ok?: boolean; error?: string } | null;
@@ -192,6 +198,7 @@ export function DeviceCard({ device }: { device: FarmDevice }) {
       payload: { path: logPath.trim(), tail: 4000 },
       busyKey: "file",
       waitSec: 25,
+      mode: "inline", // содержимое файла нужно в диалоге
     });
     if (res.ok) {
       const d = res.data as { content?: string; error?: string } | null;

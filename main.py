@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.8
+🚜 Farm Server v0.10
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
@@ -11,6 +11,16 @@
 - /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
 - /                        дашборд (dashboard.html)
 
+v0.10 — ПАНЕЛЬ ЛАГАЛА / КНОПКИ «НЕ РАБОТАЮТ» (жалоба хозяина):
+  • /client/manifest СИНХРОННО хешировал ВСЕ файлы клиента (включая info/ и
+    logs/) прямо в event loop — на время хеширования СЕРВЕР НЕ ОТВЕЧАЛ НИ НА
+    ЧТО (ни панель, ни телефоны) → «кнопки очень долго отвечают». Теперь
+    скан идёт в отдельном потоке (asyncio.to_thread), а рантайм-папки
+    info/ и logs/ ИСКЛЮЧЕНЫ из манифеста (попутный фикс: update больше НЕ
+    заливает серверные client.pid/pids/*.json на телефоны и не перетирает
+    их состояние);
+  • панель v1.0: тост «отправлено» вылетает СРАЗУ, результат телефона
+    догоняет тостом/в журнал — кнопки больше не «висят» 30–60с.
 v0.8 — НОВЫЙ ЦИКЛ (по просьбе хозяина, «сделай пока что просто»):
   • 🗑 АРХИВ УБРАН: отработанные куки УДАЛЯЮТСЯ, а не складываются в архив;
     старые записи из архива возвращены в пул (миграция при старте);
@@ -169,17 +179,40 @@ def remember_result(task_id, status, device_id, data=None):
 
 # ---------- раздача клиента ----------
 
+# 🆑 v0.10: рантайм-папки НЕ раздаём как клиент: update на телефоне копирует
+# ВСЁ из манифеста поверх своего состояния — серверные client.pid / info/pids/
+# перетирали рабочие файлы телефона. logs/ к клиенту не относятся вообще.
+CLIENT_SKIP_DIRS = {"__pycache__", "info", "logs"}
+CLIENT_MAX_FILE = 30 * 1024 * 1024   # >30МБ в клиенте кода не бывает — не хешируем
+
+
 def scan_client_dir() -> list:
     files = []
     if not CLIENT_DIR.exists():
         return files
     for p in sorted(CLIENT_DIR.rglob("*")):
-        if p.is_file() and "__pycache__" not in p.parts:
-            rel = p.relative_to(CLIENT_DIR).as_posix()
-            files.append({"path": rel,
+        if not p.is_file():
+            continue
+        parts = p.relative_to(CLIENT_DIR).parts
+        if any(part in CLIENT_SKIP_DIRS for part in parts[:-1]):
+            continue
+        try:
+            size = p.stat().st_size
+            if size > CLIENT_MAX_FILE:
+                continue
+            files.append({"path": p.relative_to(CLIENT_DIR).as_posix(),
                           "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
-                          "size": p.stat().st_size})
+                          "size": size})
+        except OSError:
+            continue
     return files
+
+
+async def scan_client_dir_async() -> list:
+    """🆑 v0.10: хеширование может занять секунды (много файлов) — раньше оно
+    шло ПРЯМО в event loop и блокировало ВСЕ запросы (панель, телефоны).
+    Теперь в отдельном потоке."""
+    return await asyncio.to_thread(scan_client_dir)
 
 
 def safe_client_path(rel: str) -> Path | None:
@@ -193,7 +226,7 @@ def safe_client_path(rel: str) -> Path | None:
 
 @app.get("/client/manifest")
 async def client_manifest():
-    return {"files": scan_client_dir(), "server_time": now()}
+    return {"files": await scan_client_dir_async(), "server_time": now()}
 
 
 @app.get("/client/file")
