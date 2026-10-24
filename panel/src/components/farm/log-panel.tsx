@@ -8,7 +8,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChevronDown, ChevronRight, ScrollText, Trash2 } from "lucide-react";
 
 export function LogPanel() {
-  const { log, clearLog } = useFarm();
+  // 🆑 v0.9: узкие селекторы — компонент не должен перерисовываться от busy/health
+  const log = useFarm((s) => s.log);
+  const clearLog = useFarm((s) => s.clearLog);
   const [open, setOpen] = useState<Set<number>>(new Set());
 
   function toggle(id: number) {

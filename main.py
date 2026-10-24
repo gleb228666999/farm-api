@@ -75,17 +75,6 @@ def spawn_bg(coro) -> asyncio.Task:
     t.add_done_callback(_BG_TASKS.discard)
     return t
 
-# фоновые задачи (рега/сбор/планировщик): ДЕРЖИМ ССЫЛКУ — create_task без ссылки
-# собирается GC-ом и задача молча умирает посреди работы (документированная ловушка)
-_BG_TASKS: set = set()
-
-
-def spawn_bg(coro) -> asyncio.Task:
-    t = asyncio.create_task(coro)
-    _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
-    return t
-
 
 # ---------- SQLite (этапы 2+4) ----------
 

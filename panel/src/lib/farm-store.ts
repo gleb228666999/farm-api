@@ -44,6 +44,9 @@ type FarmState = {
   base: string;
   health: "unknown" | "checking" | "up" | "down";
   healthInfo: string;
+  /** 🆑 v0.9: сеть/сервер недоступны (2 неудачи подряд) — фоновые опросы
+   *  затихают, чтобы не копить стопку зависших запросов (та самая «лаганина»). */
+  netDown: boolean;
   log: LogEntry[];
   busy: Record<string, boolean>; // ключ занятости кнопок
   setBase: (v: string) => void;
@@ -69,15 +72,28 @@ type FarmState = {
     timeout?: number;
     busyKey?: string;
     silent?: boolean; // не писать в журнал (фоновые опросы)
+    /** 🆑 v0.9: слить одновременные одинаковые GET в один запрос (для опросов) */
+    dedupe?: boolean;
   }) => Promise<FarmCallResult<T>>;
 };
 
 let logId = 1;
 
+// 🆑 v0.9: дедупликация одновременных одинаковых GET-опросов. Раньше каждые 5с
+// уходил новый /api/devices даже пока висел предыдущий (сервер медленный/недоступен
+// = 15с таймаут) → запросы громоздились, лимит соединений браузера забивался,
+// ВСЕ кнопки стояли в очереди → «всё лагает». Теперь одинаковый опрос,
+// пока не закончился предыдущий, переиспользует его промис.
+const inflight = new Map<string, Promise<FarmCallResult>>();
+
+// счётчик подряд идущих сетевых неудач (для netDown)
+let netFailStreak = 0;
+
 export const useFarm = create<FarmState>((set, get) => ({
   base: "",
   health: "unknown",
   healthInfo: "",
+  netDown: false,
   log: [],
   busy: {},
 
@@ -144,7 +160,8 @@ export const useFarm = create<FarmState>((set, get) => ({
     const taskId = taskIds[0];
     const deadline = Date.now() + waitSec * 1000;
     while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2000));
+      // 🆑 v0.9: 3с вместо 2с — меньше давления на прокси при длинных ожиданиях
+      await new Promise((r) => setTimeout(r, 3000));
       const rr = await call<{ status: string; data?: unknown }>({
         label: `⏳ ожидание результата ${taskId}`,
         method: "GET",
@@ -192,6 +209,18 @@ export const useFarm = create<FarmState>((set, get) => ({
   call: async <T = unknown>(opts) => {
     const { base, setBusy } = get();
     const method = (opts.method || "GET").toUpperCase();
+
+    // 🆑 v0.9: дедупликация фоновых опросов — одинаковый GET, пока предыдущий
+    // ещё летит, вернёт тот же промис вместо новой копии запроса
+    const dKey =
+      opts.dedupe && method === "GET"
+        ? `GET ${opts.path} ${JSON.stringify(opts.query || {})}`
+        : null;
+    if (dKey) {
+      const p = inflight.get(dKey);
+      if (p) return p as Promise<FarmCallResult<T>>;
+    }
+
     const entry: LogEntry = {
       id: logId++,
       ts: Date.now(),
@@ -208,57 +237,81 @@ export const useFarm = create<FarmState>((set, get) => ({
     const busyKey = opts.busyKey;
     if (busyKey) setBusy(busyKey, true);
 
-    try {
-      const res = await fetch("/api/farm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          base,
-          method,
-          path: opts.path,
-          query: opts.query,
-          body: opts.body,
-          timeout: opts.timeout,
-        }),
-      });
-      const data = (await res.json()) as FarmCallResult<T>;
-      if (!opts.silent) {
-        set((s) => ({
-          log: s.log.map((l) =>
-            l.id === entry.id
-              ? {
-                  ...l,
-                  ok: data.ok,
-                  ms: data.ms,
-                  status: data.status,
-                  result: data.data,
-                  error: data.error,
-                }
-              : l,
-          ),
-        }));
+    const exec = async (): Promise<FarmCallResult<T>> => {
+      try {
+        const res = await fetch("/api/farm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base,
+            method,
+            path: opts.path,
+            query: opts.query,
+            body: opts.body,
+            timeout: opts.timeout,
+          }),
+        });
+        const data = (await res.json()) as FarmCallResult<T>;
+        // 🆑 v0.9: успех = сеть жива; сетевой сбой = status===0 (прокси не смог
+        // достучаться до сервера фермы: сеть/таймаут). HTTP-ошибки (404 и т.п.)
+        // сетью не считаются — сервер отвечает, значит связь есть.
+        if (data.ok) {
+          netFailStreak = 0;
+          if (get().netDown) set({ netDown: false });
+        } else if (data.status === 0) {
+          netFailStreak += 1;
+          if (netFailStreak >= 2 && !get().netDown) set({ netDown: true });
+        }
+        if (!opts.silent) {
+          set((s) => ({
+            log: s.log.map((l) =>
+              l.id === entry.id
+                ? {
+                    ...l,
+                    ok: data.ok,
+                    ms: data.ms,
+                    status: data.status,
+                    result: data.data,
+                    error: data.error,
+                  }
+                : l,
+            ),
+          }));
+        }
+        return data;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // 🆑 v0.9: сам запрос к /api/farm упал — тоже сетевой сбой
+        netFailStreak += 1;
+        if (netFailStreak >= 2 && !get().netDown) set({ netDown: true });
+        if (!opts.silent) {
+          set((s) => ({
+            log: s.log.map((l) =>
+              l.id === entry.id
+                ? { ...l, ok: false, ms: null, status: 0, error: msg }
+                : l,
+            ),
+          }));
+        }
+        return {
+          ok: false,
+          status: 0,
+          ms: 0,
+          data: null,
+          error: msg,
+        } as FarmCallResult<T>;
+      } finally {
+        if (busyKey) setBusy(busyKey, false);
+        if (dKey) {
+          // маленькая задержка: чтобы опросы, пришедшие в ту же секунду,
+          // успели переиспользовать промис до его удаления из карты
+          setTimeout(() => inflight.delete(dKey), 500);
+        }
       }
-      return data;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!opts.silent) {
-        set((s) => ({
-          log: s.log.map((l) =>
-            l.id === entry.id
-              ? { ...l, ok: false, ms: null, status: 0, error: msg }
-              : l,
-          ),
-        }));
-      }
-      return {
-        ok: false,
-        status: 0,
-        ms: 0,
-        data: null,
-        error: msg,
-      } as FarmCallResult<T>;
-    } finally {
-      if (busyKey) setBusy(busyKey, false);
-    }
+    };
+
+    const p = exec();
+    if (dKey) inflight.set(dKey, p as Promise<FarmCallResult>);
+    return p;
   },
 }));

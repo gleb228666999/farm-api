@@ -34,11 +34,16 @@ function DevicesInner() {
   const refresh = useCallback(
     async (silent = false) => {
       if (!silent) setLoading(true);
+      // 🆑 v0.9: при недоступной сети фоновый опрос затихает (не копим стопку)
+      if (silent && useFarm.getState().netDown) return;
+      if (silent && typeof document !== "undefined" && document.hidden) return;
       const res = await call<FarmDevicesResponse>({
         label: "📱 Список устройств",
         method: "GET",
         path: "/api/devices",
         silent,
+        dedupe: true,
+        timeout: silent ? 8 : undefined,
       });
       if (!silent) setLoading(false);
       if (res.ok && res.data) {
@@ -61,7 +66,8 @@ function DevicesInner() {
   useEffect(() => {
     if (timer.current) clearInterval(timer.current);
     if (auto) {
-      timer.current = setInterval(() => void refresh(true), 5000);
+      // 🆑 v0.9: 10с вместо 5с + дедупликация — тихий режим при медленном сервере
+      timer.current = setInterval(() => void refresh(true), 10000);
     }
     return () => {
       if (timer.current) clearInterval(timer.current);
@@ -84,7 +90,7 @@ function DevicesInner() {
           <div className="flex items-center gap-2">
             <Switch id="auto-refresh" checked={auto} onCheckedChange={setAuto} />
             <Label htmlFor="auto-refresh" className="text-xs text-muted-foreground">
-              автообновление 5с
+              автообновление 10с
             </Label>
           </div>
           <Button

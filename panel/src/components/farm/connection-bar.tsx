@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useFarm } from "@/lib/farm-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,24 +24,39 @@ export function ConnectionBar() {
     setDraft(base);
   }
 
+  // 🆑 v0.9: тихая проверка — без записи в журнал и без тостов
+  // (используется автовосстановлением, чтобы не засорять панель)
+  const silentCheck = useCallback(
+    async (url: string): Promise<boolean> => {
+      const res = await call({
+        label: "🔎 Проверка связи (/health)",
+        method: "GET",
+        path: "/health",
+        timeout: 6,
+        silent: true,
+        dedupe: true,
+      });
+      if (res.ok) {
+        const d = res.data as { devices?: number; time?: number } | null;
+        setHealth("up", `онлайн устройств: ${d?.devices ?? "?"}`);
+        return true;
+      }
+      setHealth("down", res.error || "нет ответа");
+      return false;
+    },
+    [call, setHealth],
+  );
+
   async function runCheck(url: string) {
     setHealth("checking");
-    const res = await call({
-      label: "🔎 Проверка связи (/health)",
-      method: "GET",
-      path: "/health",
-      timeout: 10,
-    });
-    if (res.ok) {
-      const d = res.data as { devices?: number; time?: number } | null;
-      setHealth("up", `онлайн устройств: ${d?.devices ?? "?"}`);
-      toast.success("Сервер фермы отвечает", {
-        description: `онлайн устройств: ${d?.devices ?? "?"}`,
-      });
+    const up = await silentCheck(url);
+    if (up) {
+      const { healthInfo } = useFarm.getState();
+      toast.success("Сервер фермы отвечает", { description: healthInfo });
     } else {
-      setHealth("down", res.error || "нет ответа");
+      const { healthInfo } = useFarm.getState();
       toast.error(`Сервер не отвечает (${url})`, {
-        description: res.error || "проверь адрес и доступность",
+        description: healthInfo || "проверь адрес и доступность",
       });
     }
   }
@@ -64,6 +79,38 @@ export function ConnectionBar() {
     const t = setTimeout(() => void runCheck(base), 300);
     return () => clearTimeout(t);
   }, [base, health]);
+
+  // --- 🆑 v0.9 АВТОВОССТАНОВЛЕНИЕ: раньше автопроверка была ОДИН раз ---
+  // при загрузке. Если сервер в тот момент не ответил (перезапуск, сеть,
+  // холодный старт) — панель навсегда оставалась «не отвечает», ВСЕ кнопки
+  // были заблокированы («нихуя не работает»). Теперь пока health=down —
+  // тихо перепроверяем каждые 12с; сервер ожил → панель сама загорится.
+  useEffect(() => {
+    if (health !== "down" || !base) return;
+    const iv = setInterval(() => void silentCheck(base), 12000);
+    return () => clearInterval(iv);
+  }, [health, base, silentCheck]);
+
+  // --- 🆑 v0.9: возврат на вкладку → сразу тихая проверка (телефон в кармане
+  // часто теряет сеть; вернулся — панель должна сразу показать состояние) ---
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState !== "visible" || !base) return;
+      if (useFarm.getState().health === "checking") return;
+      void silentCheck(base);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [base, silentCheck]);
+
+  // --- 🆑 v0.9: сообщение «сервер снова на связи» при переходе down → up ---
+  const prevHealth = useRef(health);
+  useEffect(() => {
+    if (prevHealth.current === "down" && health === "up") {
+      toast.success("Сервер снова на связи — панель разблокирована");
+    }
+    prevHealth.current = health;
+  }, [health]);
 
   return (
     <div className="flex flex-col gap-2 rounded-xl border bg-card p-3 sm:flex-row sm:items-center sm:gap-3">
@@ -99,6 +146,11 @@ export function ConnectionBar() {
         {healthInfo && health === "up" && (
           <span className="hidden text-xs text-muted-foreground md:inline">
             {healthInfo}
+          </span>
+        )}
+        {health === "down" && (
+          <span className="hidden text-xs text-muted-foreground md:inline">
+            перепроверяю автоматически…
           </span>
         )}
       </div>

@@ -25,7 +25,9 @@ import {
 } from "lucide-react";
 
 export default function Home() {
-  const { log } = useFarm();
+  // 🆑 v0.9: узкий селектор — хедер перерисовывается только при изменении журнала,
+  // а не на каждое движение store (busy/health/base) → меньше лагов на телефоне
+  const log = useFarm((s) => s.log);
   const errors = log.filter((l) => l.ok === false).length;
 
   return (

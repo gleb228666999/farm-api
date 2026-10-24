@@ -67,6 +67,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export function FunctionsPanel() {
   const { busy, sendTask, call, health } = useFarm();
+  const netDown = useFarm((s) => s.netDown);   // 🆑 v0.9: сервер/сеть недоступны
   const [devices, setDevices] = useState<FarmDevice[] | null>(null);
   const [target, setTarget] = useState<string>("*");
 
@@ -86,13 +87,21 @@ export function FunctionsPanel() {
   const [confirmHalt, setConfirmHalt] = useState(false);
   const [confirmCycle, setConfirmCycle] = useState(false);
 
-  // ---- список устройств (для селектора цели) — тихо, каждые 5с ----
+  // ---- список устройств (для селектора цели) — тихо, каждые 10с ----
+  // 🆑 v0.9: было 5с «без тормозов» — при медленном/недоступном сервере запросы
+  // громоздились (таймаут 15с) и забивали очередь браузера → «всё лагает».
+  // Теперь: 10с, дедупликация, короткий таймаут 8с, пауза в скрытой вкладке
+  // и затихание опроса при недоступной сети (оживёт сам при восстановлении).
   const refresh = useCallback(async () => {
+    if (useFarm.getState().netDown) return;           // сеть лежит — не спамим
+    if (typeof document !== "undefined" && document.hidden) return;
     const res = await call<FarmDevicesResponse>({
       label: "📱 Список устройств",
       method: "GET",
       path: "/api/devices",
       silent: true,
+      dedupe: true,
+      timeout: 8,
     });
     if (res.ok && res.data) setDevices(res.data.devices || []);
   }, [call]);
@@ -103,9 +112,16 @@ export function FunctionsPanel() {
   }, [refresh]);
 
   useEffect(() => {
-    const iv = setInterval(() => void refresh(), 5000);
+    const iv = setInterval(() => void refresh(), 10000);
     return () => clearInterval(iv);
   }, [refresh]);
+
+  // 🆑 v0.9: сеть ожила (netDown → false) — сразу подтянуть список устройств
+  useEffect(() => {
+    if (netDown) return;
+    const t = setTimeout(() => void refresh(), 0);
+    return () => clearTimeout(t);
+  }, [netDown, refresh]);
 
   const connected = health === "up";
   const onlineDevices = (devices || []).filter((d) => d.online);
