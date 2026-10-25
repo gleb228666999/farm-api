@@ -253,8 +253,31 @@ HARVEST_WINDOW_FILE = FARM_BASE / "info" / "harvest_window.json"
 # фарм забирает его и делает ПОЛНЫЙ цикл v18.8 (Delta → ZEN-API → ключ → license)
 BYPASS_FORCE_FILE = FARM_BASE / "info" / "bypass_force.json"
 BYPASS_FLAG_TTL = 12 * 3600   # 🆕 v0.18: кнопка «живёт» 12ч — застрявший флаг не гоняет байпас вечно
+BYPASS_MIN_KEY_AGE_H = 23.0   # 🔓 v0.26 ПРАВИЛО ХОЗЯИНА: байпас только если ключу ≥23ч
 
 state = {"last_key_time": 0.0}
+
+
+def key_age_h() -> float | None:
+    """🔓 v0.26: возраст ключа Дельты (часы) или None — ключа не было/неизвестно.
+    None = байпас ДОЛЖЕН пройти (фарм без ключа не работает)."""
+    try:
+        kt = float(state.get("last_key_time") or 0)
+    except Exception:
+        return None
+    if kt <= 0:
+        return None
+    return (time.time() - kt) / 3600
+
+
+def bypass_key_old_enough() -> tuple[bool, float | None]:
+    """🔓 v0.26: (True, age) — байпас можно делать (ключа нет ИЛИ ключу ≥23ч).
+    (False, age) — ключ СВЕЖИЙ (<23ч): байпас вхолостую не гоняем.
+    force:true во флаге обходит это правило (явное желание владельца)."""
+    age = key_age_h()
+    if age is None or age >= BYPASS_MIN_KEY_AGE_H:
+        return True, age
+    return False, age
 
 # 🌾 v0.20 СБОР-ТРЕЙД: скрипты хозяина на GitHub (raw)
 HARVEST_TREID_URL = "https://raw.githubusercontent.com/gleb228666999/test/refs/heads/main/treid.lua"
@@ -2005,13 +2028,13 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 ТОЛЬКО по задаче сервера v0.25 + сбор-трейд v0.24 HOLD «НОВЫЙ ЦИКЛ» + приватки v0.22: зашитый фолбэк, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 ТОЛЬКО по задаче сервера v0.26 + ключ ≥23ч + сбор-трейд v0.24 HOLD «НОВЫЙ ЦИКЛ» + приватки v0.22: зашитый фолбэк, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
     log(f"📁 Delta License: {DELTA_LICENSE_PATH}")
     log(f"💾 State: {STATE_FILE}")
-    log(f"⏱️ Фарм: {FARM_CYCLE_SECONDS//60} мин | 🔓 Байпас: ТОЛЬКО по задаче сервера (bypass.run) — сам НЕ запускается ({BYPASS_CLICK_RETRIES}+{BYPASS_DBLCLICK_RETRIES} попыток)")
+    log(f"⏱️ Фарм: {FARM_CYCLE_SECONDS//60} мин | 🔓 Байпас: ТОЛЬКО по задаче сервера (bypass.run) и только если ключу ≥{BYPASS_MIN_KEY_AGE_H:.0f}ч ({BYPASS_CLICK_RETRIES}+{BYPASS_DBLCLICK_RETRIES} попыток)")
     log(f"🔍 Мониторинг фермы: каждые {FARM_CHECK_INTERVAL} сек")
     log(f"⏳ Задержка перед запуском: {FARM_PRELAUNCH_DELAY} сек")
     log(f"🔄 Задержка перед перезапуском: {FARM_RESTART_DELAY} сек")
@@ -2049,10 +2072,18 @@ def main():
                 # 🔓 v0.18: сбор прерван кнопкой — байпас СЕЙЧАС. Раньше флаг
                 # не съедался здесь → сбор запускался снова → монитор снова
                 # видел флаг → вечный круг, байпас не выполнялся никогда.
+                # 🔓 v0.26: ПРАВИЛО ХОЗЯИНА — ключ ≥23ч (или force во флаге).
                 if _bypass_gate_ok():
-                    if consume_bypass_request() is not None:
-                        log("🔓 Байпас по кнопке ПРЯМО ВО ВРЕМЯ окна сбора...")
-                        run_bypass_cycle()
+                    ok_age, age = bypass_key_old_enough()
+                    if (data := consume_bypass_request()) is not None:
+                        if data.get("force") or ok_age:
+                            log("🔓 Байпас по кнопке ПРЯМО ВО ВРЕМЯ окна сбора...")
+                            run_bypass_cycle()
+                        else:
+                            log(f"⏳ Байпас отклонён: ключу {age:.1f}ч < "
+                                f"{BYPASS_MIN_KEY_AGE_H:.0f}ч (правило хозяина)")
+                            emit("bypass.skipped_fresh", age_h=round(age, 1),
+                                 min_h=BYPASS_MIN_KEY_AGE_H, where="harvest")
             continue
 
         # 🍪 КУКИ-ГЕЙТ (v0.12): без куки Дельты байпас не сделается,
@@ -2080,14 +2111,26 @@ def main():
         # влияет: нет задачи с сервера — байпас не запускается, фарм работает.
         # Флаг кнопки НЕ забираем до проверки гейта — если акка нет, флаг
         # остаётся, рега чинит куки и байпас выполнится на следующем проходе.
+        # 🔓 v0.26: ПРАВИЛО ХОЗЯИНА — байпас ТОЛЬКО если ключу ≥23ч (или ключа
+        # не было вовсе). Свежий ключ → флаг снимаем и честно пишем событие:
+        # гонять 9 попыток рекламы ради ключа, которому ещё 5ч, — пустая трата
+        # телефона. force:true во флаге (владелец нажал FORCE) идёт мимо правила.
         if bypass_requested():
             if not _bypass_gate_ok():
                 continue  # флаг байпаса не тронут — выполнится после рега
-            if consume_bypass_request() is not None:
-                log("🔓 Байпас по ЗАДАЧЕ СЕРВЕРА (bypass.run) — полный цикл v18.8: "
-                    "Delta → реклама → ZEN-API → ключ → license")
-                kill_all_roblox()
-                run_bypass_cycle()
+            ok_age, age = bypass_key_old_enough()
+            if (data := consume_bypass_request()) is not None:
+                if data.get("force") or ok_age:
+                    log("🔓 Байпас по ЗАДАЧЕ СЕРВЕРА (bypass.run) — полный цикл v18.8: "
+                        "Delta → реклама → ZEN-API → ключ → license")
+                    kill_all_roblox()
+                    run_bypass_cycle()
+                else:
+                    log(f"⏳ Байпас ОТКЛОНЁН: ключу {age:.1f}ч < "
+                        f"{BYPASS_MIN_KEY_AGE_H:.0f}ч — байпас не нужен "
+                        f"(правило хозяина: байпас только по ключу >23ч)")
+                    emit("bypass.skipped_fresh", age_h=round(age, 1),
+                         min_h=BYPASS_MIN_KEY_AGE_H, where="main")
         else:
             age = f"{elapsed/3600:.1f}ч" if state["last_key_time"] > 0 else "нет ключа"
             log(f"⏱️ Возраст ключа: {age} → байпас сам НЕ запускаю "

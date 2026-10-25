@@ -1,20 +1,40 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.14
+🚜 Farm Server v0.15
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
 - /api/devices|send|broadcast|results|update
 - /api/devices/{id} (DELETE) 🗑 удалить устройство (v0.13)
 - /api/devices/{id}/cycle  🔁 НОВЫЙ ЦИКЛ на одном устройстве (v0.14)
+- /api/devices/{id}/rescue 🚑 СПАСЕНИЕ сломавшегося телефона (v0.15):
+                           убить петлю регы → фарм ⏹ → куки из пула сервера →
+                           farm ▶ (если куки починились). Офлайн — отложится (⏳).
 - /api/events              события фарма из SQLite (этап 2)
 - /api/groups              группы устройств (этап 4) + send в группу
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
 - /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
 - /api/pending             ⏳ отложенные команды (посмотреть/снять)
-- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.4) — всё на одной странице,
+- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.5) — всё на одной странице,
                            без отдельных меню: главные кнопки + устройства + расписание
                            + пул кук + группы + события. Других адресов (типа :3000) НЕТ.
+
+v0.15 — «ТЕЛЕФОНЫ ЛОМАЮТСЯ: кнопка остановки петли + байпас только по ключу >23ч» (хозяин):
+  • 🚑 ПОСТ /api/devices/{id}/rescue — телефон зациклился (rega.attempt ok=false →
+    rega.stray убивает клоны → farm.restart их оживает → по кругу часами).
+    Клиентская задача rescue.run делает ровно то, что просил хозяин:
+    СТОП петли (убить регу + фарм ⏹ + закрыть ВСЕ роблоксы) →
+    ВЗЯТЬ КУКИ ЕСЛИ НЕТ (rega check: пустые/мёртвые сессии заменяются ИЗ ПУЛА
+    сервера, БЕЗ регистрации новых акков) → ФАРМ (farm ▶, только если куки
+    починились ПОЛНОСТЬЮ — иначе фарм остаётся стоять, чтобы петля не вернулась).
+    Офлайн-телефону команда откладывается (⏳) и вручается при подключении.
+    Отложенные rega.start у устройства снимаются — петля не вернётся из очереди.
+  • 🔓 БАЙПАС ТОЛЬКО ЕСЛИ КЛЮЧУ >23ч: сервер (orchestrate_new_cycle) и клиент
+    (bypass.run / фарм-сервис) проверяют возраст ключа Дельты (last_key_time
+    из farm_state.json): свежий (<23ч) → bypass.run НЕ отправляется/отклоняется
+    («ключ свежий — байпас не нужен»). Если ключа не было вовсе — байпас ДОЛЖЕН
+    пройти (иначе фарм без ключа). Ручная кнопка 🔓 в панели предложит FORCE.
+  • force:true в bypass.run — явное принуждение владельцем (мимо правила 23ч).
 
 v0.12 — «ВСЁ ПУСТЬ БУДЕТ НА :55019 БЕЗ ОТДЕЛЬНЫХ МЕНЮ» (хозяин):
   • 🖥 dashboard.html переписан в ЕДИНУЮ панель v1.2: главные кнопки
@@ -643,6 +663,40 @@ async def api_device_cycle(device_id: str):
                      f"(рега выключена) → farm ▶ + байпас")}
 
 
+@app.post("/api/devices/{device_id}/rescue")
+async def api_device_rescue(device_id: str):
+    """🚑 v0.15 СПАСЕНИЕ сломавшегося телефона (кнопка «🚑 Спас» в строке).
+    Симптом (хозяин, 25.10): рега пытается зарегистрировать акки, попытки падают
+    (rega.attempt ok=false), stray-сторож убивает клоны, монитор фарма их оживает
+    — телефон крутит эту петлю ЧАСАМИ и сам не остановится.
+    Клиентская задача rescue.run (v0.25) делает по цепочке хозяина:
+      СТОП ПЕТЛИ (убить регу → фарм ⏹ → закрыть все роблоксы) →
+      ВЗЯТЬ КУКИ ЕСЛИ НЕТ (rega check — замена пустых/мёртвых сессий ИЗ ПУЛА
+      сервера, БЕЗ регистрации новых акков) → ФАРМ (farm ▶, если куки починились
+      полностью; иначе фарм остаётся остановлен — петля не вернётся).
+    У офлайн/спящего телефона команда ОТКЛАДЫВАЕТСЯ (⏳) и вручается при hello.
+    Отложенные rega.start устройства снимаются — петля не вернётся из очереди."""
+    known = device_id in devices or device_id in known_devices()
+    if not known:
+        raise HTTPException(404, f"{device_id} неизвестен (не онлайн и не в известных)")
+    # петля не должна вернуться из отложенных: снимаем queued rega.start
+    clear_pending({"rega.start"}, dids=[device_id])
+    if device_id not in devices:
+        queue_pending([device_id], "rescue.run", {"source": "rescue.deferred"})
+        log(f"[🚑] {device_id}: офлайн — спасение ОТЛОЖЕНО, выполнит при подключении")
+        return {"ok": True, "device_id": device_id, "deferred": True,
+                "note": "🚑 телефон офлайн — спасение отложено (⏳) и выполнится "
+                        "сразу при подключении: петля будет остановлена, куки "
+                        "заменятся из пула, фарм встанет если куки починятся"}
+    tid = await send_task(device_id, "rescue.run", {"source": "panel"})
+    log(f"[🚑] {device_id}: СПАСЕНИЕ запущено (task {tid}) — стоп петли → "
+        f"куки из пула → фарм")
+    return {"ok": True, "device_id": device_id, "deferred": False, "task_id": tid,
+            "note": "🚑 спасение запущено: убиваю петлю (рега+фарм+роблоксы) → "
+                    "куки из пула (без регистрации!) → farm ▶ если куки живы. "
+                    "Долгая операция (до ~20 мин) — результат в ответе задачи"}
+
+
 @app.post("/api/devices/{device_id}/send")
 async def api_send(device_id: str, body: dict):
     d = devices.get(device_id)
@@ -1176,6 +1230,35 @@ _CYCLE_WAIT_STOP_S = 30           # остановка фарма перед р�
 _CYCLE_REGA_POLL_S = 30           # как часто проверяем rega.done
 _CYCLE_REGA_TIMEOUT_S = 4 * 3600  # максимум ждём окончания регы
 
+# 🔓 v0.15: ПРАВИЛО ХОЗЯИНА — байпас ТОЛЬКО если ключу Дельты >23ч.
+# Если ключа не было вовсе (farm_state.json пуст/нет last_key_time) — байпас
+# ДОЛЖЕН пройти (фарм без ключа не работает).
+_BYPASS_MIN_KEY_AGE_H = 23.0
+
+
+def _key_age_h(did: str) -> float | None:
+    """Возраст ключа Дельты на устройстве (часы) или None — ключа не было/неизвестно.
+    Возраст приходит в heartbeat (farm_state.json: last_key_time)."""
+    f = (devices.get(did) or {}).get("info", {}).get("farm") or {}
+    try:
+        kt = float(f.get("last_key_time") or 0)
+    except Exception:
+        return None
+    if kt <= 0:
+        return None
+    return (now() - kt) / 3600
+
+
+def _bypass_wanted(did: str) -> bool:
+    """🔓 v0.15: слать ли bypass.run на устройство. False = ключу <23ч (свежий —
+    байпас вхолостую не гоняем). None-возраст (ключа нет) → True."""
+    age = _key_age_h(did)
+    if age is None or age >= _BYPASS_MIN_KEY_AGE_H:
+        return True
+    log(f"[🔓] {did}: ключу {age:.1f}ч < {_BYPASS_MIN_KEY_AGE_H:.0f}ч — "
+        f"bypass.run НЕ отправляю (правило хозяина: байпас только по ключу >23ч)")
+    return False
+
 
 async def _wait_rega_done(farmers: list, since_ts: float,
                           timeout_s: float = None, poll_s: float = None) -> list:
@@ -1246,14 +1329,16 @@ async def orchestrate_new_cycle(farmers: list = None, collectors: list = None,
 
     if not with_rega:
         log("[🔁] шаг 2/3: рега ВЫКЛЮЧЕНА — регистрацию ПРОПУСКАЮ, акки не трогаю")
-        started = []
+        started, bypassed = [], []
         for did in farmers:
             if await send_task(did, "service.start", {"name": "farm"}):
                 started.append(did)
-            await send_task(did, "bypass.run", {"source": source})
-        log(f"[🔁] шаг 3/3: farm ▶ + 🔓 bypass.run → {', '.join(started) or '—'} "
-            f"(фарм/сборщик сделает полный байпас ≤30с и встанет на фарм)")
-        return {"with_rega": False, "farm_started": started}
+            if _bypass_wanted(did):                      # 🔓 v0.15: ключу ≥23ч?
+                await send_task(did, "bypass.run", {"source": source})
+                bypassed.append(did)
+        log(f"[🔁] шаг 3/3: farm ▶ → {', '.join(started) or '—'}; 🔓 bypass.run → "
+            f"{', '.join(bypassed) or '— (всем свежие ключи, байпас не нужен)'}")
+        return {"with_rega": False, "farm_started": started, "bypassed": bypassed}
 
     st = load_sched_state()
     st["rega_pending"] = list(farmers)
@@ -1272,13 +1357,17 @@ async def orchestrate_new_cycle(farmers: list = None, collectors: list = None,
             sent.append(did)
     log(f"[🔁] шаг 3/3: рега запущена на {len(sent)}: {', '.join(sent)} — жду rega.done (до 4ч)")
     done = await _wait_rega_done(sent, since_ts=st["rega_started"])
+    bypassed = []
     if done:
-        log(f"[🔁] рега закончила: {', '.join(done)} → farm ▶ + 🔓 bypass.run")
+        log(f"[🔁] рега закончила: {', '.join(done)} → farm ▶ + 🔓 bypass.run (ключу ≥23ч)")
         for did in done:
             await send_task(did, "service.start", {"name": "farm"})
-            await send_task(did, "bypass.run", {"source": source})
-        log(f"[🔁] ЦИКЛ ЗАВЕРШЁН: {', '.join(done)} — свежий ключ, фарм на новых акках")
-    return {"with_rega": True, "rega_sent": sent, "rega_done": done}
+            if _bypass_wanted(did):                      # 🔓 v0.15: ключу ≥23ч?
+                await send_task(did, "bypass.run", {"source": source})
+                bypassed.append(did)
+        log(f"[🔁] ЦИКЛ ЗАВЕРШЁН: {', '.join(done)} — фарм на акках; "
+            f"байпас: {', '.join(bypassed) or '— (ключи свежие)'}")
+    return {"with_rega": True, "rega_sent": sent, "rega_done": done, "bypassed": bypassed}
 
 
 async def harvest_flow() -> bool:

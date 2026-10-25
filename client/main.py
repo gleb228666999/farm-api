@@ -101,6 +101,26 @@
         снято → фарм выйдет из сбора → сервер запустит регу → рега поднимет
         фарм). Раньше окно жило максимум 180 мин и фарм сам возвращался
         из сбора, ломая цикл хозяина.
+- v0.25: 🚑 СПАСЕНИЕ СЛОМАВШЕГОСЯ ТЕЛЕФОНА (задача rescue.run, кнопка
+        «🚑 Спас» в панели → POST /api/devices/{id}/rescue) — телефон крутит
+        петлю «rega.attempt ok=false → rega.stray убивает клоны →
+        farm.restart их оживает» часами и сам не останавливается. Цепочка
+        по просьбе хозяина («кнопку остановки это хуйни -> взять куки
+        если нет в пуле -> фарм»):
+          1) рега-сервис УБИТ (kill_running_rega) — петля кончилась;
+          2) застрявший флаг байпаса снят, фарм ⏹ (монитор перестаёт
+             реанимировать клоны; фарм при стопе сам закрывает роблоксы),
+             добиваем остатки com.roblox*;
+          3) rega check: пустые/мёртвые сессии заменяются ИЗ ПУЛА СЕРВЕРА
+             (БЕЗ регистрации новых акков — check только чинит);
+          4) куки починились ПОЛНОСТЬЮ (или были живы) → farm ▶ + флаг
+             байпаса (если ключу ≥23ч); починиться не вышло (пул пуст) →
+             фарм ОСТАЁТСЯ ОСТАНОВЛЕННЫМ — иначе куки-гейт снова поднимет
+             регу и петля вернётся.
+        🔓 ПРАВИЛО ХОЗЯИНА: байпас ТОЛЬКО если ключу Дельты ≥23ч —
+        bypass.run со свежим ключом (<23ч) отклоняется сразу (флаг даже
+        не ставится, фарм не дёргается); force:true от владельца проходит
+        мимо правила. Если ключа не было вовсе — байпас ДОЛЖЕН пройти.
 """
 import sys
 import os
@@ -128,8 +148,10 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.24"
+VERSION = "0.25"
 HARVEST_HOLD_MINUTES = 30 * 24 * 60      # 🌾 v0.24: «бессрочное» окно сбора (30 дней) — снимается только harvest.stop
+BYPASS_MIN_KEY_AGE_H = 23.0              # 🔓 v0.25: байпас только если ключу ≥23ч (правило хозяина)
+RESCUE_CHECK_TIMEOUT = 20 * 60           # 🚑 v0.25: максимум ждём rega check (починка кук из пула)
 START = time.time()
 CONFIG = json.loads((BASE / "config.json").read_text())
 
@@ -192,6 +214,19 @@ def get_farm_state() -> dict | None:
         return json.loads((BASE / "info" / "farm_state.json").read_text())
     except Exception:
         return None
+
+
+def key_age_h() -> float | None:
+    """🔓 v0.25: возраст ключа Дельты (часы) или None — ключа не было/неизвестно.
+    Читается из info/farm_state.json (его пишет фарм после bypass.ok)."""
+    st = get_farm_state() or {}
+    try:
+        kt = float(st.get("last_key_time") or 0)
+    except Exception:
+        return None
+    if kt <= 0:
+        return None
+    return (time.time() - kt) / 3600
 
 
 # ---------- 🛡 kill-switch регы акков (v0.20, безопасный режим) ----------
@@ -456,9 +491,23 @@ def task_bypass_run(payload: dict) -> dict:
     (Delta → реклама → ZEN-API → ключ → license) БЕЗ рестарта сервиса.
     Фарм не жил → запускаем: он стартует и сразу увидит флаг.
     🛡 v0.20: если на телефоне жив СБОРЩИК (collector) — фарм НЕ стартуем,
-    байпас выполнит сборщик (тот же флаг info/bypass_force.json)."""
+    байпас выполнит сборщик (тот же флаг info/bypass_force.json).
+    🔓 v0.25 ПРАВИЛО ХОЗЯИНА: байпас ТОЛЬКО если ключу ≥23ч — свежий ключ
+    (<23ч) = байпас отклонён СРАЗУ (флаг даже не ставится, фарм не дёргается).
+    force:true (владелец нажал FORCE в панели) проходит мимо правила.
+    Ключа не было вовсе (last_key_time пуст) — байпас ДОЛЖЕН пройти."""
+    force = bool(payload.get("force"))
+    age = key_age_h()
+    if not force and age is not None and age < BYPASS_MIN_KEY_AGE_H:
+        log(f"🔓 Байпас ОТКЛОНЁН: ключу {age:.1f}ч < {BYPASS_MIN_KEY_AGE_H:.0f}ч — "
+            f"байпас не нужен (правило хозяина). FORCE можно передать из панели")
+        return {"ok": False, "key_age_h": round(age, 1),
+                "min_key_age_h": BYPASS_MIN_KEY_AGE_H,
+                "note": f"ключ свежий ({age:.1f}ч < {BYPASS_MIN_KEY_AGE_H:.0f}ч) — "
+                        f"байпас не нужен и НЕ запущен; флаг на телефон не ставился"}
     data = {"ts": round(time.time(), 1),
-            "source": str(payload.get("source") or "dashboard")}
+            "source": str(payload.get("source") or "dashboard"),
+            "force": force}
     f = BASE / "info" / "bypass_force.json"
     tmp = f.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))
@@ -469,11 +518,16 @@ def task_bypass_run(payload: dict) -> dict:
     if not was_running and not collector_running:
         r = PM.start("farm")
         started = bool(r.get("ok"))
-    log(f"🔓 Флаг байпаса v18.8 поставлен (фарм "
+    age_note = (f"ключу {age:.1f}ч — правило ≥23ч пройдено"
+                if age is not None else "ключа не было — байпас обязателен")
+    log(f"🔓 Флаг байпаса v18.8 поставлен ({age_note}"
+        f"{'; FORCE владельца' if force else ''}; фарм "
         f"{'уже жил' if was_running else ('запущен' if started else 'НЕ запущен!')}"
         f"{'; СБОРЩИК жив — байпас выполнит он' if collector_running else ''})")
     return {"ok": True, "farm_was_running": was_running, "farm_started": started,
             "collector_running": collector_running,
+            "key_age_h": (round(age, 1) if age is not None else None),
+            "forced": force,
             **data,
             "note": ("сборщик жив — полный байпас v18.8 выполнит СЕРВИС COLLECTOR ≤30с"
                      if collector_running else
@@ -500,6 +554,139 @@ def task_cookie_check(payload: dict) -> dict:
     return {"ok": True, "note": "проверка запущена в фоне, события придут в 📅"}
 
 
+# ---------- 🚑 СПАСЕНИЕ сломавшегося телефона (v0.25) ----------
+
+def _read_last_check_done(since_ts: float) -> dict | None:
+    """Последнее событие check.done из info/rega_events.jsonl после since_ts.
+    rega check пишет {replaced: N, need: M} — по нему решаем судьбу фарма."""
+    f = BASE / "info" / "rega_events.jsonl"
+    try:
+        for line in reversed(f.read_text().splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("type") != "check.done":
+                continue
+            if float(ev.get("ts") or 0) < since_ts - 5:
+                return None                    # свежего check.done нет
+            return ev.get("info") or {}
+    except Exception:
+        pass
+    return None
+
+
+def task_rescue_run(payload: dict) -> dict:
+    """🚑 v0.25 АВАРИЙНАЯ КНОПКА: телефон зациклился —
+    «rega.attempt ok=false → rega.stray убивает клоны → farm.restart оживает»
+    по кругу часами (жалоба хозяина 25.10, phone_dd5423). Цепочка хозяина:
+      СТОП ПЕТЛИ → ВЗЯТЬ КУКИ ЕСЛИ НЕТ (из пула!) → ФАРМ.
+    Шаги:
+      1) рега-сервис УБИТ (kill_running_rega — режим rega, check не трогаем);
+      2) застрявший флаг байпаса снят (петле нечего подкидывать);
+      3) фарм ⏹ — его монитор перестаёт реанимировать клоны (кто с кем
+         бьётся); фарм при стопе сам закрывает ВСЕ роблоксы; добиваем
+         остатки com.roblox* через su (best effort);
+      4) rega check (ТОЛЬКО починка, регистрации НЕТ): пустые/мёртвые
+         сессии заменяются куками ИЗ ПУЛА СЕРВЕРА;
+      5) куки починились ПОЛНОСТЬЮ (или были живы) → farm ▶ и флаг байпаса
+         (если ключу ≥23ч — правило хозяина); НЕ починились (пул пуст) →
+         фарм ОСТАЁТСЯ ОСТАНОВЛЕННЫМ: куки-гейт фармa в противном случае
+         снова поднял бы регу — петля вернулась бы."""
+    src = str(payload.get("source") or "panel")
+    log(f"🚑 СПАСЕНИЕ ({src}): останавливаю петлю рега↔фарм...")
+    # 1) убить идущую регу
+    killed = kill_running_rega(reason="rescue: аварийная кнопка")
+    # 2) снять застрявший флаг байпаса
+    try:
+        (BASE / "info" / "bypass_force.json").unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f"🚑 флаг байпаса не удался: {e}")
+    # 3) фарм ⏹ (+ зачистка роблоксов)
+    farm_stop = PM.stop("farm", timeout=25)
+    log(f"🚑 фарм ⏹: {farm_stop}")
+    sh('su -c "pkill -f com.roblox"')     # добить случайные клоны (best effort)
+    time.sleep(2)
+    # 4) куки из пула: rega check (это НЕ регистрация — только замена кук)
+    check_script = BASE / "services" / "rega" / "main.py"
+    if not check_script.is_file():
+        return {"ok": False, "killed_rega_pids": killed, "farm_stop": farm_stop,
+                "error": "нет services/rega/main.py — update клиента не докатился"}
+    start_ts = time.time()
+    log("🚑 запускаю rega check: куки из пула сервера (без регистрации)...")
+    try:
+        (BASE / "logs" / "services").mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen(
+            [sys.executable, str(check_script), "check"],
+            cwd=str(BASE), env=ENV, start_new_session=True,
+            stdout=open(BASE / "logs" / "services" / "rega_check.log", "ab"),
+            stderr=subprocess.STDOUT)
+    except Exception as e:
+        return {"ok": False, "killed_rega_pids": killed, "farm_stop": farm_stop,
+                "error": f"check не запустился: {e}"}
+    waited = 0
+    while proc.poll() is None and waited < RESCUE_CHECK_TIMEOUT:
+        time.sleep(5)
+        waited += 5
+    check_timed_out = proc.poll() is None
+    if check_timed_out:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            pass
+        log(f"🚑 check не уложился в {RESCUE_CHECK_TIMEOUT // 60} мин — убит")
+    info = _read_last_check_done(start_ts) or {}
+    need = info.get("need")
+    replaced = info.get("replaced")
+    log(f"🚑 check завершён ({waited}с, timeout={check_timed_out}): "
+        f"need={need}, replaced={replaced}")
+    # 5) решение по фарму: старт ТОЛЬКО при полной починке (иначе петля вернётся)
+    farm_started, bypass_queued = False, False
+    if need is None:
+        verdict = ("результат check не прочитан — фарм ОСТАВЛЕН ОСТАНОВЛЕННЫМ "
+                   "(осторожный режим: петля не должна вернуться); "
+                   "глянь logs/services/rega_check.log и farm.log")
+    elif int(need or 0) == 0:
+        r = PM.start("farm")
+        farm_started = bool(r.get("ok"))
+        verdict = "куки живы — фарм запущен"
+    elif replaced and int(replaced) >= int(need):
+        r = PM.start("farm")
+        farm_started = bool(r.get("ok"))
+        verdict = f"куки заменены из пула ({replaced}/{need}) — фарм запущен"
+    else:
+        verdict = (f"починить не вышло (заменено {replaced or 0} из {need}) — "
+                   f"фарм ОСТАВЛЕН ОСТАНОВЛЕННЫМ, чтобы куки-гейт не поднял "
+                   f"регу снова. Долей куки в пул и нажми 🚑 ещё раз")
+    # флаг байпаса — по правилу хозяина (ключу ≥23ч; нет ключа = нужен)
+    if farm_started:
+        age = key_age_h()
+        if age is None or age >= BYPASS_MIN_KEY_AGE_H:
+            f = BASE / "info" / "bypass_force.json"
+            tmp = f.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"ts": round(time.time(), 1),
+                                       "source": "rescue", "force": False}))
+            tmp.replace(f)
+            bypass_queued = True
+            log(f"🚑 флаг байпаса поставлен "
+                f"({'ключа не было' if age is None else f'ключу {age:.1f}ч'})")
+        else:
+            log(f"🚑 байпас не ставлю: ключу {age:.1f}ч < {BYPASS_MIN_KEY_AGE_H:.0f}ч")
+    result = {"ok": True, "source": src, "killed_rega_pids": killed,
+              "farm_stop": farm_stop, "check_need": need,
+              "check_replaced": replaced, "check_timed_out": check_timed_out,
+              "farm_started": farm_started, "bypass_queued": bypass_queued,
+              "verdict": verdict,
+              "note": f"🚑 {verdict}"}
+    log(f"🚑 СПАСЕНИЕ ГОТОВО: {verdict}")
+    return result
+
+
 def _task_service_start(payload: dict) -> dict:
     """🛡 v0.23: service.start rega подчиняется kill-switch (раньше обходил —
     сервер/панель могли запустить регу при выключенном тумблере)."""
@@ -522,6 +709,7 @@ TASKS_SYNC = {
     "rega.switch":    task_rega_switch,
     "cookie.check":   task_cookie_check,
     "bypass.run":     task_bypass_run,
+    "rescue.run":     task_rescue_run,       # 🚑 v0.25: спасение сломавшегося телефона
 }
 
 

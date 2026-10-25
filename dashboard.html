@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>🚜 Farm Panel</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- ЕДИНАЯ ПАНЕЛЬ v1.2 — всё на одной странице, без отдельных меню.
-     Отдаётся FastAPI на :8000 → portmap :55019. Других адресов нет. -->
+<!-- ЕДИНАЯ ПАНЕЛЬ v1.5 — всё на одной странице, без отдельных меню.
+     Отдаётся FastAPI на :8000 → portmap :55019. Других адресов нет.
+     v1.5: 🚑 Спас (стоп петли рега↔фарм → куки из пула → фарм) + правило байпаса «ключ ≥23ч» -->
 <style>
 body{font-family:system-ui;background:#111;color:#ddd;margin:14px}
 h1{font-size:1.35em;margin:0 0 6px}
@@ -35,7 +36,7 @@ textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:
           border:2px solid #4a4;border-radius:10px;padding:10px;margin-top:10px}
 .mega-row .col{display:flex;flex-wrap:wrap;gap:2px;align-items:center}
 </style></head><body>
-<h1>🚜 Farm Panel <span class="mut">v1.4 — всё на одной странице</span></h1>
+<h1>🚜 Farm Panel <span class="mut">v1.5 — всё на одной странице</span></h1>
 <div class="mut" id="summary">загрузка...</div>
 
 <div id="banner">
@@ -136,12 +137,15 @@ textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:
 <div class="mut" style="margin-top:10px">
 🛡 Рега ВЫКЛ = безопасный режим (акки с лутом защищены). 🌾 СБОР = HOLD: фармеры сидят в приватках,
 пока не нажат «🔁 НОВЫЙ ЦИКЛ» — только он включает регу и ставит фарм. Отработанные куки удаляются (архива нет).
+🔓 Байпас = только если ключу ≥23ч (свежий ключ — отклонится; FORCE предложит кнопка 🔓). 🚑 Спас = телефон зациклился:
+стоп петли → куки из пула (без регистрации) → фарм.
 </div>
 
 <script>
 let selected=null;
 let GROUPS={};
 let POOL_TEXT={};
+window._DEVINFO={};   // 🖥 v1.5: device_id → последняя запись /api/devices (для возраста ключа в 🔓)
 const checked=new Set();
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -221,16 +225,37 @@ function keyAge(d){
 
 // ---------- 🔓 байпас ----------
 const RESET_KEY_CMD='python -c "import json,pathlib;p=pathlib.Path(\'info/farm_state.json\');d=json.loads(p.read_text()) if p.exists() else {};d[\'last_key_time\']=0;p.write_text(json.dumps(d))"';
+function devKeyAge(id){
+  const d=(window._DEVINFO||{})[id];
+  const f=d&&d.info&&d.info.farm;
+  if(!f||!f.last_key_time)return null;
+  return (Date.now()/1000-f.last_key_time)/3600;
+}
 async function bypassSel(d){
   if(!d){show('❌ сначала кликни по устройству');return}
-  if(!confirm('🔓 БАЙПАС '+d+' (как в v18.8):\nDelta → реклама → ZEN-API → ключ → license\n+ вылетевшие клоны перезапускаются в плейс.\nПродолжить?'))return;
+  const age=devKeyAge(d);
+  let force=false;
+  if(age!=null&&age<23){
+    if(!confirm('🔓 БАЙПАС '+d+':\n⚠️ ключу '+age.toFixed(1)+'ч — МЕНЬШЕ 23ч.\nПо правилу «байпас только если ключу >23ч» телефон ОТКЛОНИТ байпас (ключ ещё свежий).\n\nОтправить ПРИНУДИТЕЛЬНО (force)?'))return;
+    force=true;
+  }else{
+    const note=(age!=null?('ключу '+age.toFixed(1)+'ч — правило ≥23ч пройдено'):'возраст ключа неизвестен (или ключа нет) — байпас пройдёт');
+    if(!confirm('🔓 БАЙПАС '+d+' (как в v18.8):\nDelta → реклама → ZEN-API → ключ → license\n+ вылетевшие клоны перезапускаются в плейс.\n'+note+'\n\nПродолжить?'))return;
+  }
   selected=d;
-  show('🔓 Байпас '+d+': отправляю bypass.run...');
-  const t=await sendTask(selected,{type:'task',task:'bypass.run',payload:{source:'panel'}});
+  show('🔓 Байпас '+d+(force?' (FORCE)':'')+': отправляю bypass.run...');
+  const t=await sendTask(selected,{type:'task',task:'bypass.run',payload:{source:'panel',force:force}});
   if(t){
     const res=await waitResult(t.task_id,25000);
-    if(res&&res.data&&res.data.ok){
-      show('🔓 БАЙПАС '+d+' ЗАПУЩЕН ✓\nфарм выполнит полный цикл v18.8: Delta → реклама → ZEN-API → ключ → license.\nвылетевшие клоны перезапускаются мониторингом каждые 30с.\nсмотри 📅 События: bypass.ok / bypass.fail / farm.restart');
+    if(res&&res.data){
+      if(res.data.ok){
+        show('🔓 БАЙПАС '+d+' ЗАПУЩЕН ✓'+(res.data.forced?' (FORCE владельца)':'')
+          +'\nключ: '+(res.data.key_age_h!=null?('уже '+res.data.key_age_h+'ч'):'не было — получим новый')
+          +'\nфарм выполнит полный цикл v18.8: Delta → реклама → ZEN-API → ключ → license.\nсмотри 📅 События: bypass.ok / bypass.fail / bypass.skipped_fresh');
+      }else{
+        show('🚫 БАЙПАС ОТКЛОНЁН ('+d+'):\n'+(res.data.note||JSON.stringify(res.data,null,2).slice(0,600))
+          +'\n\nЕсли очень нужен — отправь с FORCE (кнопка 🔓 сама предложит при свежем ключе).');
+      }
       return;
     }
     show('⚠️ bypass.run не поддержан (старый клиент?) — запасной способ...');
@@ -577,6 +602,7 @@ function devRow(d){
     ['farm ⏹',      'farmOff(selected)','r'],
     ['🔓',          'bypassSel(selected)','b'],
     ['🔁 Цикл',     'devCycle(selected)','b'],
+    ['🚑 Спас',     'rescueDev(selected)','r'],
     ['🆕',          'regaDev(selected)',''],
     ['🌾⏹',        'harvestOff(selected)','r'],
     ['farm.log',    'farmLog(selected)','b'],
@@ -618,6 +644,29 @@ function regaDev(d){
   if(!confirm('🆕 Рег акков на '+d+'?\n⚠️ Куки на этом телефоне будут ПЕРЕЗАПИСАНЫ!'))return;
   selected=d;run(selected,{type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
 }
+async function rescueDev(id){
+  if(!id){show('❌ сначала кликни по устройству');return}
+  if(!confirm('🚑 СПАСЕНИЕ '+id+'?\n\nТелефон зациклился (rega.attempt fail → stray убивает клоны → farm.restart оживает)?\n\nЧто будет:\n1) рега-сервис УБИТ — петля кончится\n2) фарм ⏹ + закрыты ВСЕ роблоксы\n3) куки проверены, пустые/мёртвые заменены ИЗ ПУЛА СЕРВЕРА (БЕЗ регистрации!)\n4) куки живы → farm ▶ (+ байпас, только если ключу ≥23ч)\n   пул пуст и куки мертвы → фарм останется стоять (иначе петля вернётся)\n\nДолгая операция — до ~20 мин. Продолжить?'))return;
+  selected=id;
+  try{
+    const r=await fetch('/api/devices/'+encodeURIComponent(id)+'/rescue',{method:'POST'});
+    const j=await r.json();
+    if(!r.ok||!j.ok){show('❌ '+(j.detail||j.note||('ошибка '+r.status)));return}
+    if(j.deferred){show('🚑 '+id+': '+(j.note||'отложено (⏳)'));refresh();return}
+    show('🚑 СПАСЕНИЕ '+id+' ИДЁТ...\nстоп петли → куки из пула (до ~20 мин) → фарм если живы\nжду результат задачи '+j.task_id+'...');
+    const res=await waitResult(j.task_id,1500000);
+    if(res&&res.data){
+      const dd=res.data;
+      show('🚑 СПАСЕНИЕ '+id+' ✓\n'+(dd.verdict||dd.note||JSON.stringify(dd,null,2).slice(0,2500))
+        +'\n\nрега убита: '+((dd.killed_rega_pids||[]).length)+' прогр. · фарм ⏹: '+(dd.farm_stop&&dd.farm_stop.ok?'ок':'?')
+        +' · куки: need='+(dd.check_need??'?')+', заменено='+(dd.check_replaced??'?')
+        +' · farm ▶: '+(dd.farm_started?'ДА':'НЕТ')+' · флаг байпаса: '+(dd.bypass_queued?'поставлен':'нет'));
+    }else{
+      show('⏰ спасение ещё идёт (check кук долгий) — результат: /api/results/'+j.task_id+'\nфарм-лог покажет прогресс (кнопка farm.log)');
+    }
+  }catch(e){show('❌ '+e)}
+  refresh();
+}
 async function devCycle(id){
   const regaOn=!!window._regaEnabled;
   const what=regaOn
@@ -635,6 +684,8 @@ async function refresh(){
   try{
     const j=await(await fetch('/api/devices')).json();
     renderBanner(j);
+    window._DEVINFO={};
+    (j.devices||[]).forEach(x=>{window._DEVINFO[x.device_id]=x});
     $('rows').innerHTML=j.devices.map(devRow).join('')||'<tr><td colspan="9" class="mut">нет устройств — подключи телефоны (bootstrap.py)</td></tr>';
     $('summary').textContent='устройств: '+j.count
       +(selected?' · выбрано: '+selected:'')
