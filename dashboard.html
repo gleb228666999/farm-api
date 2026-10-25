@@ -100,6 +100,7 @@ textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:
 <div class="flex" style="margin-top:6px">
 <button class="b" onclick="poolAdd()">➕ Добавить в пул</button>
 <button class="g" onclick="loadPool()">♻ Обновить</button>
+<button class="r" onclick="poolClear()">🗑 Очистить весь пул</button>
 <span class="mut">отработанные куки удаляются сразу (архива нет)</span>
 </div>
 <div id="poolList" style="margin-top:6px;max-height:220px;overflow:auto"></div>
@@ -547,6 +548,16 @@ async function poolDel(id){
   if(!confirm('Удалить куку #'+id+' НАСОВСЕМ?'))return;
   await fetch('/api/pool/delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({ids:[id]})});
+  loadPool();
+}
+async function poolClear(){
+  const total=document.getElementById('poolCounts').textContent||'';
+  if(!confirm('Удалить ВСЕ куки из пула безвозвратно? ('+total+')'))return;
+  if(!confirm('ТОЧНО? Отменить будет нельзя.'))return;
+  const r=await fetch('/api/pool/clear',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({confirm:true})});
+  const j=await r.json().catch(()=>({}));
+  show(r.ok?'🗑 пул очищен, удалено: '+j.deleted:'❌ '+(j.detail||await r.text()));
   loadPool();
 }
 

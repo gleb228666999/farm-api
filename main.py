@@ -875,6 +875,20 @@ def db_pool_delete(ids: list) -> int:
     return n
 
 
+def db_pool_clear() -> int:
+    """🗑 Очистить ВЕСЬ пул разом: удаляются все куки, включая забронированные.
+    Счётчик id сбрасывается в ноль (sqlite_sequence), чтобы список начинался с #1."""
+    with DB_LOCK:
+        n = DB.execute("SELECT COUNT(*) FROM pool").fetchone()[0]
+        DB.execute("DELETE FROM pool")
+        try:
+            DB.execute("DELETE FROM sqlite_sequence WHERE name='pool'")
+        except Exception:
+            pass
+        DB.commit()
+    return n
+
+
 def db_pool_move(ids: list, to: str) -> int:
     # 🗑 v0.8: архива нет — переносить можно только в пул (снять бронь)
     if to not in ("pool",):
@@ -913,6 +927,14 @@ async def api_pool_delete(body: dict):
     if not ids:
         raise HTTPException(400, "no ids")
     return {"ok": True, "deleted": db_pool_delete(ids)}
+
+
+@app.post("/api/pool/clear")
+async def api_pool_clear(body: dict):
+    """🗑 Очистить весь пул разом (v0.13). Защита: только с confirm=true."""
+    if not body.get("confirm"):
+        raise HTTPException(400, "требуется confirm:true — удалит ВСЕ куки безвозвратно")
+    return {"ok": True, "deleted": db_pool_clear()}
 
 
 @app.post("/api/pool/move")
