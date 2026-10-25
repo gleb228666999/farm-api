@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.12
+🚜 Farm Server v0.13
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
 - /api/devices|send|broadcast|results|update
+- /api/devices/{id} (DELETE) 🗑 удалить устройство (v0.13)
 - /api/events              события фарма из SQLite (этап 2)
 - /api/groups              группы устройств (этап 4) + send в группу
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
@@ -24,6 +25,16 @@ v0.12 — «ВСЁ ПУСТЬ БУДЕТ НА :55019 БЕЗ ОТДЕЛЬНЫХ �
   • 🖥 GET / отдаёт панель с Cache-Control: no-store — после обновления кода
     браузер больше не показывает старую версию из кэша.
   • 📡 /api/schedule отдаёт harvest_running (индикатор HOLD-сбора в панели).
+
+v0.13 — «КНОПКА УДАЛИТЬ УСТРОЙСТВО + КЛИЕНТ НЕ НАЗНАЧАЕТ СЕБЕ ЗАДАЧИ» (хозяин):
+  • 🗑 DELETE /api/devices/{device_id} — удалить устройство из панели:
+    known_devices.json + его отложенные команды (+ сразу выпадает из списка,
+    если был онлайн). Если клиент на телефоне жив — телефон появится снова
+    при следующем hello (чтобы убрать НАВСЕГДА — farm_stop.sh на телефоне).
+  • 🚫 клиент (services/farm) v0.25: УДАЛЁН авто-байпас по кулдауну 24ч
+    (жалоба: «в 20 мин он начал делать байпас, хотя я всё остановил»).
+    Байпас теперь ТОЛЬКО по задаче bypass.run (кнопка 🔓 в панели).
+    Клиент больше НИКОГДА не назначает себе задачи сам.
 
 v0.11 — «СТОП ФАРМ ВСЕМ НЕ РАБОТАЕТ / КНОПКИ ДЛЯ ВСЕХ НИЧЕГО НЕ ДЕЛАЮТ» (хозяин):
   • ⏳ ГЛАВНОЕ: команды «для всех» (Стоп фарм всем, тумблер регы) уходили ТОЛЬКО
@@ -538,6 +549,40 @@ async def api_pending_clear():
     clear_pending(None)
     log("[⏳] Отложенные команды сняты (кнопка панели)")
     return {"ok": True, "note": "отложенные команды сняты"}
+
+
+@app.delete("/api/devices/{device_id}")
+async def api_device_delete(device_id: str):
+    """🗑 v0.13: УДАЛИТЬ УСТРОЙСТВО из панели.
+    Убирает из known_devices.json (переживает рестарт сервера) и снимает его
+    отложенные команды; если был онлайн — сразу выпадает из списка.
+    ⚠️ Если клиент на телефоне жив — при следующем hello телефон появится
+    СНОВА (сам переподключается). Убрать навсегда — farm_stop.sh на телефоне."""
+    if not device_id or device_id.startswith("anon_"):
+        raise HTTPException(400, "такое устройство удалить нельзя")
+    removed_known = False
+    removed_pending = 0
+    with PENDING_LOCK:
+        known = load_json_file(KNOWN_DEVICES_FILE, [])
+        if device_id in known:
+            known.remove(device_id)
+            save_json_file(KNOWN_DEVICES_FILE, known)
+            removed_known = True
+        pend = load_json_file(PENDING_FILE, {})
+        if device_id in pend:
+            removed_pending = len(pend.pop(device_id))
+            save_json_file(PENDING_FILE, pend)
+    was_online = device_id in devices
+    if was_online:
+        devices.pop(device_id, None)   # онлайн → сразу исчезает из списка;
+        # его ws-обработчик завершится сам (очередь отвязана), hello вернёт телефон
+    ok = removed_known or was_online or removed_pending > 0
+    note = (f"удалено: known={'да' if removed_known else 'нет'}, "
+            f"отложенных снято: {removed_pending}, был онлайн: {'да' if was_online else 'нет'}") \
+        if ok else "устройство и так отсутствует в панели"
+    log(f"[🗑] Удаление устройства {device_id}: {note}")
+    return {"ok": ok, "device_id": device_id, "removed_known": removed_known,
+            "removed_pending": removed_pending, "was_online": was_online, "note": note}
 
 
 @app.post("/api/devices/{device_id}/send")

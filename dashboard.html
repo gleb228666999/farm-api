@@ -35,7 +35,7 @@ textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:
           border:2px solid #4a4;border-radius:10px;padding:10px;margin-top:10px}
 .mega-row .col{display:flex;flex-wrap:wrap;gap:2px;align-items:center}
 </style></head><body>
-<h1>🚜 Farm Panel <span class="mut">v1.2 — всё на одной странице</span></h1>
+<h1>🚜 Farm Panel <span class="mut">v1.3 — всё на одной странице</span></h1>
 <div class="mut" id="summary">загрузка...</div>
 
 <div id="banner">
@@ -573,6 +573,7 @@ function devRow(d){
     ['📅',          'ev(selected)','b'],
     ['♻️',          'restartCli(selected)','g'],
     ['⛔',          'haltCli(selected)','r'],
+    ['🗑',          'devDelete(selected)','r'],
     ['⬇ APK',       'apk(selected)','u'],
     ['⬆',           'upd(selected)','u'],
     ['exec',        'exe(selected)','b'],
@@ -591,6 +592,15 @@ function devRow(d){
     +'<td>'+btns+'</td></tr>';
 }
 function devClick(id){selected=id;refresh()}
+async function devDelete(id){
+  if(!id){show('❌ сначала кликни по устройству');return}
+  if(!confirm('🗑 Удалить устройство '+id+' из панели?\n\nУдалится из «известных устройств» + снимутся его отложенные команды.\n\n⚠️ Если клиент на телефоне жив — телефон появится СНОВА при следующем подключении.\nЧтобы убрать НАВСЕГДА — выключи клиент на телефоне (sh farm_stop.sh).'))return;
+  const r=await fetch('/api/devices/'+encodeURIComponent(id),{method:'DELETE'});
+  const j=await r.json();
+  show(j.ok?('🗑 '+id+': '+(j.note||'удалено')):('❌ '+(j.detail||'ошибка удаления')));
+  if(selected===id)selected=null;
+  refresh();
+}
 function regaDev(d){
   if(regaGuarded())return;
   if(!confirm('🆕 Рег акков на '+d+'?\n⚠️ Куки на этом телефоне будут ПЕРЕЗАПИСАНЫ!'))return;

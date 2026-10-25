@@ -151,6 +151,18 @@ v0.24 (🌾 СБОР = HOLD — сидим в приватках до кнопк
     на свой сервер, байпас по кнопке работает как раньше.
 - ✅ Лог/события честно пишут «HOLD — до кнопки НОВЫЙ ЦИКЛ» вместо гигантских
     минут.
+
+v0.25 (🚫 КЛИЕНТ НЕ НАЗНАЧАЕТ СЕБЕ ЗАДАЧИ — байпас только с сервера):
+- ✅ ПО ПРОСЬБЕ ХОЗЯИНА («клиент должен выполнять только задачи с сервера,
+    а не сам назначать себе»; факт 25.10: «в 20 мин он начал делать байпас,
+    хотя я до этого всё остановил»): УДАЛЁН авто-байпас по кулдауну 24ч.
+    Раньше главный цикл при устаревшем ключе (last_key_time > 24ч) САМ
+    запускал run_bypass_cycle() БЕЗ всякой задачи с сервера — ровно это и
+    видел хозяин. Теперь байпас выполняется ТОЛЬКО по явной задаче сервера
+    bypass.run (кнопка 🔓 в панели → bypass_force.json). Возраст ключа
+    ни на что не влияет: нет задачи — байпас не запускается, фарм работает.
+- ✅ FORCE_BYPASS («байпас каждый цикл») больше НЕ ДЕЙСТВУЕТ — тот же
+    принцип: никаких самоназначенных задач, только сервер.
 """
 import os
 import sys
@@ -187,6 +199,9 @@ FARM_CHECK_INTERVAL = 30      # Как часто проверять окна ф
 FARM_PRELAUNCH_DELAY = 15     # Задержка перед обычным запуском фермера
 FARM_RESTART_DELAY = 15       # Задержка перед перезапуском вылетевшего фермера
 
+# 🚫 v0.25: авто-байпас по кулдауну УДАЛЁН — байпас ТОЛЬКО по задаче сервера
+# (bypass.run → bypass_force.json). Константы оставлены для совместимости,
+# НИЧЕГО не включают и в логике не используются.
 FORCE_BYPASS = False
 BYPASS_COOLDOWN = 86400
 
@@ -1990,13 +2005,13 @@ def run_bypass_cycle():
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
-    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 + сбор-трейд v0.24 HOLD «НОВЫЙ ЦИКЛ» + приватки v0.22: зашитый фолбэк, services/farm)")
+    log("🤖 Roblox Farm SERVICE START (farm v16.2 + байпас v18.8 ТОЛЬКО по задаче сервера v0.25 + сбор-трейд v0.24 HOLD «НОВЫЙ ЦИКЛ» + приватки v0.22: зашитый фолбэк, services/farm)")
     log(f"   su: {SU_BIN}")
     log(f"🔗 ZEN-API: {'✅' if ZEN_API_KEY and ZEN_API_KEY != 'YOUR_API_KEY_HERE' else '❌ Не настроен'}")
     log(f"📁 Delta Lua: {DELTA_AUTOEXEC_PATH}")
     log(f"📁 Delta License: {DELTA_LICENSE_PATH}")
     log(f"💾 State: {STATE_FILE}")
-    log(f"⏱️ Фарм: {FARM_CYCLE_SECONDS//60} мин | Байпас: {'каждый цикл' if FORCE_BYPASS else '1 раз в 24ч'} ({BYPASS_CLICK_RETRIES}+{BYPASS_DBLCLICK_RETRIES} попыток)")
+    log(f"⏱️ Фарм: {FARM_CYCLE_SECONDS//60} мин | 🔓 Байпас: ТОЛЬКО по задаче сервера (bypass.run) — сам НЕ запускается ({BYPASS_CLICK_RETRIES}+{BYPASS_DBLCLICK_RETRIES} попыток)")
     log(f"🔍 Мониторинг фермы: каждые {FARM_CHECK_INTERVAL} сек")
     log(f"⏳ Задержка перед запуском: {FARM_PRELAUNCH_DELAY} сек")
     log(f"🔄 Задержка перед перезапуском: {FARM_RESTART_DELAY} сек")
@@ -2058,26 +2073,25 @@ def main():
         now = time.time()
         elapsed = now - state["last_key_time"]
 
-        # 🔓 БАЙПАС (кнопка v0.15 / кулдаун) + 🍪 ГЕЙТ ЖИВОГО АККА (v0.17):
-        # флаг кнопки НЕ забираем до проверки — если акка нет, флаг остаётся,
-        # рега чинит куки и байпас выполнится сам на следующем проходе
-        cooldown_left = (not FORCE_BYPASS and state["last_key_time"] > 0
-                         and elapsed < BYPASS_COOLDOWN)
-        if bypass_requested() or not cooldown_left:
+        # 🔓 v0.25: БАЙПАС — ТОЛЬКО ПО ЗАДАЧЕ СЕРВЕРА (кнопка 🔓 → bypass.run →
+        # bypass_force.json). САМОНАЗНАЧЕНИЕ УДАЛЕНО (жалоба хозяина 25.10:
+        # «в 20 мин он начал делать байпас, хотя я всё остановил» — это был
+        # авто-байпас по кулдауну 24ч). Возраст ключа больше ни на что не
+        # влияет: нет задачи с сервера — байпас не запускается, фарм работает.
+        # Флаг кнопки НЕ забираем до проверки гейта — если акка нет, флаг
+        # остаётся, рега чинит куки и байпас выполнится на следующем проходе.
+        if bypass_requested():
             if not _bypass_gate_ok():
                 continue  # флаг байпаса не тронут — выполнится после рега
-
-        bypass_now = consume_bypass_request() is not None
-        if bypass_now:
-            log("🔓 Байпас по кнопке (дашборд) — полный цикл v18.8: Delta → реклама → ZEN-API → ключ → license")
-            kill_all_roblox()
-            run_bypass_cycle()
-        elif not cooldown_left:
-            log("🔓 Кулдаун истёк → запускаю байпас (СРАЗУ в плейс через com.roblox.client)")
-            if not run_bypass_cycle():
-                log("💥 Байпас провален, но продолжаю фарм")
+            if consume_bypass_request() is not None:
+                log("🔓 Байпас по ЗАДАЧЕ СЕРВЕРА (bypass.run) — полный цикл v18.8: "
+                    "Delta → реклама → ZEN-API → ключ → license")
+                kill_all_roblox()
+                run_bypass_cycle()
         else:
-            log(f"⏱️ Кулдаун: {elapsed/3600:.1f}ч / 24ч → ПРОПУСК байпаса")
+            age = f"{elapsed/3600:.1f}ч" if state["last_key_time"] > 0 else "нет ключа"
+            log(f"⏱️ Возраст ключа: {age} → байпас сам НЕ запускаю "
+                f"(только по кнопке 🔓 / bypass.run с сервера)")
 
         kill_all_roblox()
         farm_pkgs = launch_roblox_light_farm()
