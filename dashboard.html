@@ -35,7 +35,7 @@ textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:
           border:2px solid #4a4;border-radius:10px;padding:10px;margin-top:10px}
 .mega-row .col{display:flex;flex-wrap:wrap;gap:2px;align-items:center}
 </style></head><body>
-<h1>🚜 Farm Panel <span class="mut">v1.3 — всё на одной странице</span></h1>
+<h1>🚜 Farm Panel <span class="mut">v1.4 — всё на одной странице</span></h1>
 <div class="mut" id="summary">загрузка...</div>
 
 <div id="banner">
@@ -576,6 +576,7 @@ function devRow(d){
     ['farm ▶',      'farmOn(selected)'],
     ['farm ⏹',      'farmOff(selected)','r'],
     ['🔓',          'bypassSel(selected)','b'],
+    ['🔁 Цикл',     'devCycle(selected)','b'],
     ['🆕',          'regaDev(selected)',''],
     ['🌾⏹',        'harvestOff(selected)','r'],
     ['farm.log',    'farmLog(selected)','b'],
@@ -616,6 +617,19 @@ function regaDev(d){
   if(regaGuarded())return;
   if(!confirm('🆕 Рег акков на '+d+'?\n⚠️ Куки на этом телефоне будут ПЕРЕЗАПИСАНЫ!'))return;
   selected=d;run(selected,{type:'task',task:'rega.start',payload:{target:5}},'🆕 Рег акков ('+d+')',20000);
+}
+async function devCycle(id){
+  const regaOn=!!window._regaEnabled;
+  const what=regaOn
+    ?'телефон снимет окно сбора → рега НОВЫХ акков → после реги автоматически farm ▶ + 🔓 байпас'
+    :'телефон снимет окно сбора → регистрация ПРОПУЩЕНА (рега выключена) → сразу farm ▶ + 🔓 байпас на текущих акках';
+  if(!confirm('🔁 НОВЫЙ ЦИКЛ на '+id+'?\n\nЧто будет: '+what+'.\n\nОстальные телефоны не тронутся. Продолжить?'))return;
+  try{
+    const r=await fetch('/api/devices/'+encodeURIComponent(id)+'/cycle',{method:'POST'});
+    const j=await r.json();
+    show(r.ok&&j.ok?('🔁 '+id+': '+(j.note||'цикл запущен')):('❌ '+(j.detail||j.note||'ошибка')));
+  }catch(e){show('❌ '+e)}
+  refresh();
 }
 async function refresh(){
   try{

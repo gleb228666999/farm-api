@@ -216,8 +216,20 @@ class ProcessManager:
         return len(lst) >= 5
 
     def reanimate(self) -> list:
-        """Перезапустить умершие сервисы, которые ДОЛЖНЫ работать"""
+        """Перезапустить умершие сервисы, которые ДОЛЖНЫ работать.
+        🆕 v0.26: desired ПЕРЕЧИТЫВАЕТСЯ С ДИСКА каждый цикл. services_state.json —
+        общий файл: сервис rega (rearm_farm) пишет туда farm=running НАПРЯМУЮ,
+        минуя PM в памяти. Раньше desired грузился ОДИН раз при старте main,
+        поэтому внешний реарм игнорировался: рега заканчивала («акки зарегало»),
+        а фарм не поднимался никогда (жалоба хозяина 25.10: «фарм/байпас не
+        происходит»). Теперь реарм видим watchdog'у ≤10с."""
         with self._lock:
+            try:
+                disk = json.loads(self.state_file.read_text())
+                if isinstance(disk, dict):
+                    self.desired.update(disk)       # внешний реарм → память
+            except Exception:
+                pass                                # битый/нет файла — память надёжнее
             restarted = []
             for name, svc in self.manifest.items():
                 if not svc.get("restart"):

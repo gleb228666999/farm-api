@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-🚜 Farm Server v0.13
+🚜 Farm Server v0.14
 - /ws                      телефоны (hello, heartbeat, events, task, result)
 - /client/manifest|file    раздача клиента (sha256)
 - /bootstrap.py            установщик для телефонов
 - /api/devices|send|broadcast|results|update
 - /api/devices/{id} (DELETE) 🗑 удалить устройство (v0.13)
+- /api/devices/{id}/cycle  🔁 НОВЫЙ ЦИКЛ на одном устройстве (v0.14)
 - /api/events              события фарма из SQLite (этап 2)
 - /api/groups              группы устройств (этап 4) + send в группу
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
 - /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
 - /api/pending             ⏳ отложенные команды (посмотреть/снять)
-- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.2) — всё на одной странице,
+- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.4) — всё на одной странице,
                            без отдельных меню: главные кнопки + устройства + расписание
                            + пул кук + группы + события. Других адресов (типа :3000) НЕТ.
 
@@ -25,6 +26,24 @@ v0.12 — «ВСЁ ПУСТЬ БУДЕТ НА :55019 БЕЗ ОТДЕЛЬНЫХ �
   • 🖥 GET / отдаёт панель с Cache-Control: no-store — после обновления кода
     браузер больше не показывает старую версию из кэша.
   • 📡 /api/schedule отдаёт harvest_running (индикатор HOLD-сбора в панели).
+
+v0.14 — «НОВЫЙ ЦИКЛ: АККИ ЗАРЕГАЛО, А ФАРМ/БАЙПАС НЕ ПРОИСХОДИТ» (хозяин):
+  • 🐛 КОРЕНЬ БАГА: после регы фарм поднимал клиентский watchdog, но сервис rega
+    пишет реарм (farm=running) ПРЯМО В services_state.json, а ProcessManager
+    клиента держал desired В ПАМЯТИ и файл перечитывал только при рестарте —
+    реарм игнорировался, фарм не поднимался никогда. Фикс в клиенте (PM v0.26):
+    watchdog перечитывает desired с диска каждый цикл.
+  • 🔁 НОВЫЙ ЦИКЛ больше НЕ надеется на watchdog: сервер сам ждёт rega.done
+    (до 4ч) и ЯВНО шлёт farm ▶ + 🔓 bypass.run — свежий ключ + фарм на новых акках.
+  • 🛡 Тумблер «Рега акков» РЕШАЕТ: rega_enabled=false → НОВЫЙ ЦИКЛ ПРОПУСКАЕТ
+    регистрацию и сразу фарм+байпас (акки с лутом не трогаются). Раньше цикл
+    ВСЕГДА принудительно включал регу (cfg["rega_enabled"]=True) — хозяин:
+    «я акки зарегал и не хочу новые создавать».
+  • 🔁 НОВЫЙ POST /api/devices/{device_id}/cycle — «НОВЫЙ ЦИКЛ» на ОДНОМ
+    устройстве (кнопка «🔁 Цикл» в строке телефона): подключил новый телефон —
+    запусти цикл только ему. Панель v1.4.
+  • ⏳ clear_pending(...) умеет снимать отложенные стопы ТОЛЬКО у одного
+    устройства (кнопка на одном телефоне не отменяет стопы остальных).
 
 v0.13 — «КНОПКА УДАЛИТЬ УСТРОЙСТВО + КЛИЕНТ НЕ НАЗНАЧАЕТ СЕБЕ ЗАДАЧИ» (хозяин):
   • 🗑 DELETE /api/devices/{device_id} — удалить устройство из панели:
@@ -190,17 +209,27 @@ def pop_pending(did: str) -> list:
     return [e for e in out if e.get("ts", 0) > now() - PENDING_TTL]
 
 
-def clear_pending(task_names: set | None = None):
+def clear_pending(task_names: set | None = None, dids: list | None = None):
     """Снять отложенные команды (полностью или по типу) — при новом
-    намерении хозяина (Сбор/Новый цикл/Рега)."""
+    намерении хозяина (Сбор/Новый цикл/Рега).
+    🆕 v0.14: dids — сузить на конкретные устройства (кнопка «🔁 Цикл»
+    на одном телефоне не должна снимать отложенные стопы у остальных)."""
     with PENDING_LOCK:
         pend = load_json_file(PENDING_FILE, {})
-        if not pend or task_names is None:
-            if pend:
+        if not pend:
+            return
+        if task_names is None:
+            if dids is None:
                 save_json_file(PENDING_FILE, {})
+                return
+            for did in dids:
+                pend.pop(did, None)
+            save_json_file(PENDING_FILE, pend)
             return
         changed = False
         for did in list(pend):
+            if dids is not None and did not in dids:
+                continue
             kept = [e for e in pend[did] if e.get("task") not in task_names]
             if len(kept) != len(pend[did]):
                 changed = True
@@ -583,6 +612,35 @@ async def api_device_delete(device_id: str):
     log(f"[🗑] Удаление устройства {device_id}: {note}")
     return {"ok": ok, "device_id": device_id, "removed_known": removed_known,
             "removed_pending": removed_pending, "was_online": was_online, "note": note}
+
+
+@app.post("/api/devices/{device_id}/cycle")
+async def api_device_cycle(device_id: str):
+    """🔁 НОВЫЙ ЦИКЛ на ОДНОМ устройстве (v0.14): например, подключил новый
+    телефон — запусти цикл только ему, остальных не трогает.
+    Правило то же, что у общего «НОВЫЙ ЦИКЛ»: рега включена → рега →
+    farm ▶ + байпас; выключена → сразу farm ▶ + байпас.
+    Устройство должно быть сейчас на связи (кнопка для только что подключённых)."""
+    if device_id not in devices:
+        raise HTTPException(400, f"{device_id} сейчас не на связи — подключи телефон и повтори")
+    if device_id.startswith("anon_"):
+        raise HTTPException(400, "анонимам цикл не нужен")
+    if is_collector(device_id):
+        raise HTTPException(400, "сборщику «НОВЫЙ ЦИКЛ» не нужен — он про фармеров")
+    clear_pending({"harvest.stop", "service.stop farm"}, dids=[device_id])
+    cfg = load_schedule()
+    with_rega = bool(cfg.get("rega_enabled", False))
+    if with_rega:
+        # килл-свитч → ON именно этому телефону (идемпотентно)
+        await send_task(device_id, "rega.switch", {"enabled": True, "source": "cycle.dev"})
+    log(f"[🔁] НОВЫЙ ЦИКЛ на {device_id} (рега={'ВКЛ' if with_rega else 'ВЫКЛ'})")
+    spawn_bg(orchestrate_new_cycle(farmers=[device_id], collectors=[],
+                                   with_rega=with_rega, source="cycle.dev"))
+    return {"ok": True, "device_id": device_id, "with_rega": with_rega,
+            "note": (f"Цикл на {device_id}: окно сбора снято → farm ⏹ → рега → "
+                     f"после rega.done farm ▶ + байпас" if with_rega else
+                     f"Цикл на {device_id}: окно сбора снято → регистрация ПРОПУЩЕНА "
+                     f"(рега выключена) → farm ▶ + байпас")}
 
 
 @app.post("/api/devices/{device_id}/send")
@@ -1112,49 +1170,115 @@ async def orchestrate_rega():
 
 _HARVEST_RUNNING = False   # 🌾 v0.8: True пока фармеры сидят в приватках (HOLD до «НОВЫЙ ЦИКЛ»)
 
+# ⏱️ v0.14: паузы оркестрации вынесены в константы (тестируемость: E2E сжимает их)
+_CYCLE_WAIT_HARVEST_S = 45        # выход фарма из сессии сбора (≤40с мониторинг)
+_CYCLE_WAIT_STOP_S = 30           # остановка фарма перед регой
+_CYCLE_REGA_POLL_S = 30           # как часто проверяем rega.done
+_CYCLE_REGA_TIMEOUT_S = 4 * 3600  # максимум ждём окончания регы
 
-async def orchestrate_new_cycle() -> dict:
-    """🔁 НОВЫЙ ЦИКЛ (v0.8) — единственный способ завершить HOLD-сбор:
-    1) окно сбора снято у ВСЕХ (фармеры выходят из приваток ≤30-40с,
-       закрывают роблоксы, возвращают фарм-скрипт в автоэкзекют;
-       сборщики выходят из окна и ждут);
-    2) ждём 45с — фарм успевает выйти из сессии сбора;
-    3) farm ⏹ у фармеров (чистый старт для регы);
-    4) ждём 30с;
-    5) rega.start — рега по завершении САМА поднимет фарм (watchdog),
-       т.е. «ставится на фарм» с новыми акками.
-    Кил-свитч регы ПЕРЕД этим включается сервером (/api/cycle/new шлёт
-    rega.switch enabled=true) — явное нажатие кнопки хозяина = явное
-    разрешение на регистрацию, поэтому отдельного force у телефона не нужно."""
-    farmers = farmers_online()
-    collectors = collectors_online()
+
+async def _wait_rega_done(farmers: list, since_ts: float,
+                          timeout_s: float = None, poll_s: float = None) -> list:
+    """🆕 v0.14: ждём rega.done от фармеров (события летят из outbox клиента
+    в таблицу events). Возвращает список ЗАКОНЧИВШИХ.
+    Кто не закончил за timeout — не получает farm ▶/байпас от сервера:
+    клиентский watchdog (v0.26 читает реарм rearm_farm с диска) поднимет
+    фарм сам, когда рега реально закончит."""
+    timeout_s = _CYCLE_REGA_TIMEOUT_S if timeout_s is None else timeout_s
+    poll_s = _CYCLE_REGA_POLL_S if poll_s is None else poll_s
+    pending = set(farmers)
+    deadline = now() + timeout_s
+    done_all: list = []
+    while pending and now() < deadline:
+        await asyncio.sleep(poll_s)
+        for did in list(pending):
+            try:
+                r = DB.execute(
+                    "SELECT 1 FROM events WHERE device_id=? AND type='rega.done' AND recv>? LIMIT 1",
+                    (did, since_ts)).fetchone()
+            except Exception:
+                r = None
+            if r:
+                pending.discard(did)
+                done_all.append(did)
+                log(f"[🔁] ✅ {did}: рега закончила ({len(done_all)}/{len(farmers)})")
+    if pending:
+        log(f"[🔁] ⏳ рега не закончила за {int(timeout_s // 3600)}ч: "
+            f"{', '.join(sorted(pending))} — фарм им поднимет клиентский watchdog "
+            f"после реального завершения регы")
+    return done_all
+
+
+async def orchestrate_new_cycle(farmers: list = None, collectors: list = None,
+                                with_rega: bool = None, source: str = "cycle.new"):
+    """🔁 НОВЫЙ ЦИКЛ (v0.14) — единственный способ завершить HOLD-сбор.
+    Работает для ВСЕХ фармеров (кнопка «НОВЫЙ ЦИКЛ») и для ОДНОГО устройства
+    (кнопка «🔁 Цикл» в строке телефона, source="cycle.dev").
+
+    1) окно сбора снято у участников (фарм выходит из сессии сбора ≤40с);
+    2) ждём 45с;
+    3) два пути по тумблеру «Рега акков» (rega_enabled):
+       • ВКЛЮЧЕНА → farm ⏹ (чистый старт) → 30с → rega.start → ждём rega.done
+         (до 4ч) → каждому закончившему: farm ▶ + 🔓 bypass.run (свежий ключ);
+       • ВЫКЛЮЧЕНА → акки НЕ ТРОГАЕМ: сразу farm ▶ + 🔓 bypass.run
+         («я акки зарегал и не хочу новые создавать» — хозяин, 25.10).
+    Перезапуск фарма теперь ЯВНЫЙ с сервера (v0.8-v0.13 молча надеялись на
+    клиентский watchdog, который реарм rearm_farm не видел → «акки зарегало,
+    фарм/байпас не происходит»). Watchdog остаётся страховкой."""
+    global _HARVEST_RUNNING
+    farmers = farmers_online() if farmers is None else farmers
+    collectors = collectors_online() if collectors is None else collectors
     if not farmers:
-        log("[🔁] НОВЫЙ ЦИКЛ: нет онлайн-фармеров — некому регать/фармить")
-        return {"sent": [], "note": "нет онлайн-фармеров"}
+        log("[🔁] НОВЫЙ ЦИКЛ: нет фармеров — некому фармить/регать")
+        return {"sent": [], "note": "нет фармеров"}
+    if with_rega is None:
+        with_rega = bool(load_schedule().get("rega_enabled", False))
+    all_online_now = set(farmers_online()) | set(collectors_online())
+    log(f"[🔁] НОВЫЙ ЦИКЛ ({source}, рега={'ВКЛ' if with_rega else 'ВЫКЛ'}): "
+        f"фармеры={farmers}, сборщики={collectors}")
+    log(f"[🔁] шаг 1/3: снимаю окно сбора у {len(farmers) + len(collectors)} устройств")
+    for did in collectors + farmers:
+        await send_task(did, "harvest.stop", {})
+    # 🌾 HOLD-индикатор гасим, только если цикл накрывает ВСЕХ, кто собирал
+    if set(farmers + collectors) >= all_online_now:
+        _HARVEST_RUNNING = False
+    await asyncio.sleep(_CYCLE_WAIT_HARVEST_S)   # фарм выходит из сессии сбора (≤40с мониторинг)
+
+    if not with_rega:
+        log("[🔁] шаг 2/3: рега ВЫКЛЮЧЕНА — регистрацию ПРОПУСКАЮ, акки не трогаю")
+        started = []
+        for did in farmers:
+            if await send_task(did, "service.start", {"name": "farm"}):
+                started.append(did)
+            await send_task(did, "bypass.run", {"source": source})
+        log(f"[🔁] шаг 3/3: farm ▶ + 🔓 bypass.run → {', '.join(started) or '—'} "
+            f"(фарм/сборщик сделает полный байпас ≤30с и встанет на фарм)")
+        return {"with_rega": False, "farm_started": started}
+
     st = load_sched_state()
-    st["rega_pending"] = farmers
+    st["rega_pending"] = list(farmers)
     st["rega_started"] = now()
     st["last_rega"] = datetime.now(MSK).strftime("%Y-%m-%d")
     save_sched_state(st)
-    log(f"[🔁] НОВЫЙ ЦИКЛ шаг 1/4: снимаю окно сбора у {len(farmers) + len(collectors)} устройств")
-    for did in collectors + farmers:
-        await send_task(did, "harvest.stop", {})
-    global _HARVEST_RUNNING
-    _HARVEST_RUNNING = False
-    await asyncio.sleep(45)                    # фарм выходит из сессии сбора (≤40с мониторинг)
-    log(f"[🔁] НОВЫЙ ЦИКЛ шаг 2/4: farm ⏹ на {len(farmers)}: {', '.join(farmers)}")
+    log(f"[🔁] шаг 2/3: farm ⏹ на {len(farmers)}: {', '.join(farmers)} (чистый старт для регы)")
     for did in farmers:
         await send_task(did, "service.stop", {"name": "farm"})
-    await asyncio.sleep(30)                    # фарм успевает остановиться и закрыть роблоксы
+    await asyncio.sleep(_CYCLE_WAIT_STOP_S)   # фарм успевает остановиться и закрыть роблоксы
     cfg = load_schedule()
     sent = []
     for did in farmers:
         tid = await send_task(did, "rega.start", {"target": cfg.get("rega_target", 5)})
         if tid:
             sent.append(did)
-    log(f"[🔁] НОВЫЙ ЦИКЛ шаг 3/4: рега запущена на {len(sent)}: {', '.join(sent)} — "
-        f"по завершении рега сама поднимет фарм (шаг 4/4)")
-    return {"sent": sent}
+    log(f"[🔁] шаг 3/3: рега запущена на {len(sent)}: {', '.join(sent)} — жду rega.done (до 4ч)")
+    done = await _wait_rega_done(sent, since_ts=st["rega_started"])
+    if done:
+        log(f"[🔁] рега закончила: {', '.join(done)} → farm ▶ + 🔓 bypass.run")
+        for did in done:
+            await send_task(did, "service.start", {"name": "farm"})
+            await send_task(did, "bypass.run", {"source": source})
+        log(f"[🔁] ЦИКЛ ЗАВЕРШЁН: {', '.join(done)} — свежий ключ, фарм на новых акках")
+    return {"with_rega": True, "rega_sent": sent, "rega_done": done}
 
 
 async def harvest_flow() -> bool:
@@ -1383,34 +1507,42 @@ async def api_harvest_now():
 
 @app.post("/api/cycle/new")
 async def api_cycle_new():
-    """🔁 НОВЫЙ ЦИКЛ (v0.8): единственный выход из HOLD-сбора.
-    1) включаем регу (тумблер ON: сервер + все онлайн-телефоны — явное
-       действие хозяина = явное разрешение реге);
-    2) фон: окно сбора снято → 45с → farm ⏹ → 30с → rega.start;
-       рега по завершении сама поднимет фарм (ставится на фарм)."""
+    """🔁 НОВЫЙ ЦИКЛ (v0.14): единственный выход из HOLD-сбора.
+    Тумблер «Рега акков» РЕШАЕТ путь:
+    • ВКЛ → рега новых акков → после rega.done farm ▶ + байпас;
+    • ВЫК → регистрацию ПРОПУСКАЕМ, сразу farm ▶ + байпас (акки не трогаем).
+    Раньше (v0.8-v0.13) цикл ВСЕГДА принудительно включал регу и после регы
+    надеялся на клиентский watchdog, который реарм не видел → «акки зарегало,
+    фарм/байпас не происходит» (жалоба хозяина 25.10)."""
     farmers = farmers_online()
     if not farmers:
         log("[🔁] НОВЫЙ ЦИКЛ: нет онлайн-фармеров")
         return {"ok": False, "farmers": [], "farmers_total": farmers_total(),
                 "note": "нет онлайн-фармеров — некому запускать новый цикл"}
-    # 1) кил-свитч регы → ON (сервер + телефоны). Это НЕ «тихая авторега»:
-    #    хозяин сам нажал «НОВЫЙ ЦИКЛ».
     clear_pending({"harvest.stop", "service.stop farm"})   # ⏳ новый цикл — старые стопы отменяются
     cfg = load_schedule()
-    cfg["rega_enabled"] = True
-    save_schedule(cfg)
+    with_rega = bool(cfg.get("rega_enabled", False))
     sent_sw = []
-    for did in list(devices.keys()):
-        if did.startswith("anon_") or not device_online(did):
-            continue
-        if await send_task(did, "rega.switch", {"enabled": True,
-                                                "source": "cycle.new"}):
-            sent_sw.append(did)
-    log(f"[🔁] НОВЫЙ ЦИКЛ: рега включена (rega.switch → {sent_sw or '—'}); запускаю оркестрацию")
-    spawn_bg(orchestrate_new_cycle())
-    return {"ok": True, "farmers": farmers, "rega_switch_sent": sent_sw,
-            "note": "НОВЫЙ ЦИКЛ: окно сбора снято → farm ⏹ → рега → фарм сам поднимется "
-                    "с новыми акками"}
+    if with_rega:
+        # килл-свитч → ON на всех онлайн-телефонах (идемпотентно: он уже ON).
+        # Это НЕ «тихая авторега»: хозяин сам нажал «НОВЫЙ ЦИКЛ» при включённом тумблере.
+        for did in list(devices.keys()):
+            if did.startswith("anon_") or not device_online(did):
+                continue
+            if await send_task(did, "rega.switch", {"enabled": True,
+                                                    "source": "cycle.new"}):
+                sent_sw.append(did)
+        log(f"[🔁] НОВЫЙ ЦИКЛ: рега включена (rega.switch → {sent_sw or '—'}); запускаю оркестрацию")
+    else:
+        log("[🔁] НОВЫЙ ЦИКЛ: рега ВЫКЛЮЧЕНА (rega_enabled=false) — "
+            "регистрацию пропускаю, сразу фарм + байпас")
+    spawn_bg(orchestrate_new_cycle(farmers=farmers, collectors=collectors_online(),
+                                   with_rega=with_rega, source="cycle.new"))
+    return {"ok": True, "farmers": farmers, "with_rega": with_rega, "rega_switch_sent": sent_sw,
+            "note": ("НОВЫЙ ЦИКЛ: окно сбора снято → farm ⏹ → рега → после rega.done "
+                     "farm ▶ + байпас" if with_rega else
+                     "НОВЫЙ ЦИКЛ: окно сбора снято → регистрация ПРОПУЩЕНА (рега выключена) "
+                     "→ farm ▶ + байпас на текущих акках")}
 
 
 @app.post("/api/farm/stop")
