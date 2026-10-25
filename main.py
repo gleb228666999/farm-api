@@ -15,9 +15,17 @@
 - /api/pool                🍪 пул кук на сервере (добавить/удалить/бронь)
 - /api/schedule            ⏰ расписание: сбор по времени МСК (HOLD-режим)
 - /api/pending             ⏳ отложенные команды (посмотреть/снять)
-- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.5) — всё на одной странице,
+- /                        ЕДИНАЯ ПАНЕЛЬ (dashboard.html v1.6) — всё на одной странице,
                            без отдельных меню: главные кнопки + устройства + расписание
                            + пул кук + группы + события. Других адресов (типа :3000) НЕТ.
+
+v0.16 — «БАЙПАС ТОЛЬКО ЕСЛИ КЛЮЧУ БОЛЬШЕ 24ч» (хозяин, уточнение правила):
+  • 🔓 Порог «правила хозяина» поднят с 23ч до 24ч на ВСЕХ уровнях:
+    сервер (_BYPASS_MIN_KEY_AGE_H), клиент (BYPASS_MIN_KEY_AGE_H),
+    фарм-сервис (BYPASS_MIN_KEY_AGE_H) и панель (подсказка 🔓/FORCE).
+    Свежий ключ (<24ч) → bypass.run НЕ отправляется/отклоняется;
+    ключа не было вовсе (None) → байпас ДОЛЖЕН пройти; force:true по-прежнему
+    обходит правило (явное желание владельца).
 
 v0.15 — «ТЕЛЕФОНЫ ЛОМАЮТСЯ: кнопка остановки петли + байпас только по ключу >23ч» (хозяин):
   • 🚑 ПОСТ /api/devices/{id}/rescue — телефон зациклился (rega.attempt ok=false →
@@ -1230,10 +1238,10 @@ _CYCLE_WAIT_STOP_S = 30           # остановка фарма перед р�
 _CYCLE_REGA_POLL_S = 30           # как часто проверяем rega.done
 _CYCLE_REGA_TIMEOUT_S = 4 * 3600  # максимум ждём окончания регы
 
-# 🔓 v0.15: ПРАВИЛО ХОЗЯИНА — байпас ТОЛЬКО если ключу Дельты >23ч.
+# 🔓 v0.16: ПРАВИЛО ХОЗЯИНА — байпас ТОЛЬКО если ключу Дельты >24ч.
 # Если ключа не было вовсе (farm_state.json пуст/нет last_key_time) — байпас
 # ДОЛЖЕН пройти (фарм без ключа не работает).
-_BYPASS_MIN_KEY_AGE_H = 23.0
+_BYPASS_MIN_KEY_AGE_H = 24.0
 
 
 def _key_age_h(did: str) -> float | None:
@@ -1250,13 +1258,13 @@ def _key_age_h(did: str) -> float | None:
 
 
 def _bypass_wanted(did: str) -> bool:
-    """🔓 v0.15: слать ли bypass.run на устройство. False = ключу <23ч (свежий —
+    """🔓 v0.16: слать ли bypass.run на устройство. False = ключу <24ч (свежий —
     байпас вхолостую не гоняем). None-возраст (ключа нет) → True."""
     age = _key_age_h(did)
     if age is None or age >= _BYPASS_MIN_KEY_AGE_H:
         return True
     log(f"[🔓] {did}: ключу {age:.1f}ч < {_BYPASS_MIN_KEY_AGE_H:.0f}ч — "
-        f"bypass.run НЕ отправляю (правило хозяина: байпас только по ключу >23ч)")
+        f"bypass.run НЕ отправляю (правило хозяина: байпас только по ключу >24ч)")
     return False
 
 
@@ -1333,7 +1341,7 @@ async def orchestrate_new_cycle(farmers: list = None, collectors: list = None,
         for did in farmers:
             if await send_task(did, "service.start", {"name": "farm"}):
                 started.append(did)
-            if _bypass_wanted(did):                      # 🔓 v0.15: ключу ≥23ч?
+            if _bypass_wanted(did):                      # 🔓 v0.16: ключу ≥24ч?
                 await send_task(did, "bypass.run", {"source": source})
                 bypassed.append(did)
         log(f"[🔁] шаг 3/3: farm ▶ → {', '.join(started) or '—'}; 🔓 bypass.run → "
@@ -1359,10 +1367,10 @@ async def orchestrate_new_cycle(farmers: list = None, collectors: list = None,
     done = await _wait_rega_done(sent, since_ts=st["rega_started"])
     bypassed = []
     if done:
-        log(f"[🔁] рега закончила: {', '.join(done)} → farm ▶ + 🔓 bypass.run (ключу ≥23ч)")
+        log(f"[🔁] рега закончила: {', '.join(done)} → farm ▶ + 🔓 bypass.run (ключу ≥24ч)")
         for did in done:
             await send_task(did, "service.start", {"name": "farm"})
-            if _bypass_wanted(did):                      # 🔓 v0.15: ключу ≥23ч?
+            if _bypass_wanted(did):                      # 🔓 v0.16: ключу ≥24ч?
                 await send_task(did, "bypass.run", {"source": source})
                 bypassed.append(did)
         log(f"[🔁] ЦИКЛ ЗАВЕРШЁН: {', '.join(done)} — фарм на акках; "
