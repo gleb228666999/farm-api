@@ -19,6 +19,22 @@
                            без отдельных меню: главные кнопки + устройства + расписание
                            + пул кук + группы + события. Других адресов (типа :3000) НЕТ.
 
+v0.17 — «ПРОКСИ: вставил блок из бота → вся сеть телефона через SOCKS5» (хозяин):
+  • 🌐 ПУЛ ПРОКСИ: POST /api/proxy/add — парсер блока продавца (socks5://login:pass@ip:port,
+    ip:порт + логин/пароль строками, дата окончания дд.мм.гг или «6д», комментарий «Shrd»).
+    GET /api/proxy (список + кто на каком сидит), /api/proxy/delete, /api/proxy/clear,
+    /api/proxy/distribute — раздать свободные телефонам без прокси (1 телефон = 1 прокси).
+  • 🌐 ПРИВЯЗКА: POST /api/devices/{id}/proxy {"proxy_id": N|null} — назначить/снять.
+    Онлайн-телефону — сразу, офлайн — ⏳ отложенная. Прокси, занятый другим
+    телефоном, переезжает: старому уходит proxy.set null.
+  • 🌐 КЛИЕНТ (proxy.set + proxy_fwd.py): поднимает локальный прозрачный
+    форвардер (SO_ORIGINAL_DST → SOCKS5 с авторизацией) и заворачивает ВЕСЬ
+    TCP-трафик телефона через iptables → «вся сеть через прокси». Исключения:
+    сам прокси-сервер, сервер фермы, локальные сети (иначе потеряем телефон).
+    UDP 443/80 режется (REJECT) — чтобы QUIC не утекал мимо прокси.
+    Статус летит в heartbeat (info.proxy) → панель. При hello сервер
+    синхронизирует привязку (как rega.switch).
+
 v0.16 — «БАЙПАС ТОЛЬКО ЕСЛИ КЛЮЧУ БОЛЬШЕ 24ч» (хозяин, уточнение правила):
   • 🔓 Порог «правила хозяина» поднят с 23ч до 24ч на ВСЕХ уровнях:
     сервер (_BYPASS_MIN_KEY_AGE_H), клиент (BYPASS_MIN_KEY_AGE_H),
@@ -144,6 +160,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse
@@ -320,6 +337,25 @@ def init_db() -> sqlite3.Connection:
         added_ts   REAL,
         source     TEXT DEFAULT '')""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pool_status ON pool(status)")
+    # 🌐 v0.17: пул прокси + привязка прокси→телефон
+    conn.execute("""CREATE TABLE IF NOT EXISTS proxies(
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        scheme     TEXT DEFAULT 'socks5',   -- socks5 | http
+        host       TEXT NOT NULL,
+        port       INTEGER NOT NULL,
+        login      TEXT DEFAULT '',
+        password   TEXT DEFAULT '',
+        expires_ts REAL,                    -- когда кончается аренда (NULL = неизвестно)
+        comment    TEXT DEFAULT '',         -- «Shrd» из блока бота
+        raw        TEXT DEFAULT '',         -- исходный текст блока (для отладки)
+        added_ts   REAL,
+        source     TEXT DEFAULT '')""")
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_uniq
+                    ON proxies(host, port, login)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS proxy_assign(
+        device_id   TEXT PRIMARY KEY,       -- один телефон = один прокси
+        proxy_id    INTEGER,                -- NULL = прокси снят
+        assigned_ts REAL)""")
     conn.commit()
     return conn
 
@@ -510,6 +546,24 @@ async def ws_endpoint(ws: WebSocket):
                         "task_id": f"regasw_{secrets.token_hex(3)}"})
                 except Exception as e:
                     log(f"[!] rega.switch sync {device_id}: {e}")
+                # 🌐 v0.17: синхронизация прокси при hello — телефон догоняет свою
+                # привязку (после рестарта сервера / долгого сна телефона).
+                # Если телефон уже сообщает ровно тот же proxy_id — не дёргаем.
+                try:
+                    apid, aprow = db_proxy_assignment(device_id)
+                    cur = (msg.get("info") or {}).get("proxy") or {}
+                    if (cur.get("proxy_id") or None) != (apid or None) or \
+                            (apid is None and cur.get("enabled")):
+                        await queue.put({
+                            "type": "task", "task": "proxy.set",
+                            "payload": {"proxy": proxy_url(aprow) if aprow else None,
+                                        "proxy_id": apid,
+                                        "source": "server-hello-sync"},
+                            "task_id": f"proxysw_{secrets.token_hex(3)}"})
+                        log(f"[🌐] {device_id}: hello-sync proxy.set "
+                            f"({aprow and (str(aprow['host']) + ':' + str(aprow['port'])) or 'выключить'})")
+                except Exception as e:
+                    log(f"[!] proxy sync {device_id}: {e}")
 
             elif t == "heartbeat":
                 d = devices.get(device_id)
@@ -519,6 +573,8 @@ async def ws_endpoint(ws: WebSocket):
                         d["info"]["battery"] = msg["battery"]
                     if "farm" in msg:
                         d["info"]["farm"] = msg["farm"]   # last_key_time → 🔑 дашборд
+                    if "proxy" in msg:
+                        d["info"]["proxy"] = msg["proxy"]  # 🌐 v0.17: статус прокси → панель
                 await queue.put({"type": "heartbeat_ack", "server_time": now()})
 
             elif t == "events":
@@ -1085,6 +1141,345 @@ async def api_pool_report(body: dict):
     r = db_pool_report(did, body.get("used"), body.get("dead"), body.get("released"))
     log(f"[🍪] {did}: report used={r['used']} dead={r['dead']} released={r['released']}")
     return r
+
+
+# ============================================================
+# 🌐 ПРОКСИ (v0.17): вставил блок из бота → парсим → привязка к телефону.
+# Телефон при proxy.set поднимает локальный прозрачный форвардер
+# (SO_ORIGINAL_DST → SOCKS5 с авторизацией) и заворачивает ВЕСЬ TCP
+# через iptables в него — «вся сеть работает через прокси».
+# ============================================================
+
+RE_PROXY_URL = re.compile(
+    r'(socks5h?|socks4|https?)://([^:@\s/]+):([^@\s/]+)@([\w.\-]+):(\d+)',
+    re.I)
+RE_IPV4PORT = re.compile(r'\b(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})\b')
+RE_DATE_EXP = re.compile(r'\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})(?:[,\s]+(\d{1,2}):(\d{2}))?')
+RE_DAYS_EXP = re.compile(r'\b(\d{1,3})\s*д(?:н|ней|ня)?\b')
+_PROXY_HEADER_WORDS = {"данные", "дата", "окончания", "комментарий",
+                       "https", "socks5", "socks4", "http", "https/", "/"}
+
+
+def parse_proxy_text(text: str) -> list:
+    """Парсер блока из бота-продавца прокси. Формат:
+        Shrd
+            95.164.110.189:9176
+            V45FCw
+            tmr9H6
+            socks5://V45FCw:tmr9H6@95.164.110.189:9176
+            HTTPs / SOCKS5
+            02.11.26, 20:23
+            6д
+    Основной источник — строка socks5://login:pass@ip:port. Если её нет,
+    фолбэк: IP:порт + две строки-токена сразу после (логин, пароль).
+    Дата окончания: дд.мм.гг (приоритет) или «6д» (дней от сейчас).
+    Возвращает список dict: scheme/host/port/login/password/expires_ts/comment."""
+    text = text or ""
+    entries = []
+    matches = list(RE_PROXY_URL.finditer(text))
+    # блок прокси = [конец предыдущего URL … начало следующего URL]:
+    # комментарий ищем ДО строки socks5://…, дату окончания — ПОСЛЕ неё
+    for i, m in enumerate(matches):
+        blk_start = matches[i - 1].end() if i > 0 else 0
+        blk_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        before = text[blk_start:m.start()]
+        after = text[m.end():blk_end]
+        scheme = "http" if m.group(1).lower() in ("http", "https") else "socks5"
+        host, port = m.group(4), int(m.group(5))
+        if not _valid_host_port(host, port):
+            continue
+        comment = _comment_from(before, m.group(2), m.group(3))
+        entries.append({"scheme": scheme, "host": host, "port": port,
+                        "login": m.group(2), "password": m.group(3),
+                        "expires_ts": _expiry_in(after, 0), "comment": comment})
+    if not entries:
+        # --- фолбэк: блоки без строки socks5:// ---
+        for m in RE_IPV4PORT.finditer(text):
+            host, port = m.group(1), int(m.group(2))
+            if not _valid_host_port(host, port):
+                continue
+            login, password = "", ""
+            tail = text[m.end():m.end() + 200].splitlines()
+            head = text[max(0, m.start() - 200):m.start()].splitlines()
+            if head:
+                # последний элемент может содержать начало ip-строки — обрезаем
+                idx = head[-1].find(m.group(1))
+                head[-1] = head[-1][:idx] if idx >= 0 else head[-1]
+            def _toks(lines):
+                out = []
+                for ln in lines:
+                    ln = ln.strip()
+                    if re.fullmatch(r'[A-Za-z0-9_.\-]{3,40}', ln or "") and \
+                            not RE_DATE_EXP.search(ln) and not RE_DAYS_EXP.search(ln):
+                        out.append(ln)
+                    if len(out) == 2:
+                        break
+                return out
+            toks = _toks(tail[1:])                       # после ip (формат продавца)
+            if len(toks) < 2:
+                pre = []                                 # до ip: последние два в прямом порядке
+                for ln in head:                          # (splitlines уже без хвостовой пустой)
+                    ln = ln.strip()
+                    if re.fullmatch(r'[A-Za-z0-9_.\-]{3,40}', ln or "") and \
+                            not RE_DATE_EXP.search(ln) and not RE_DAYS_EXP.search(ln):
+                        pre.append(ln)
+                toks = pre[-2:]
+            if len(toks) == 2:
+                login, password = toks[0], toks[1]
+            entries.append({"scheme": "socks5", "host": host, "port": port,
+                            "login": login, "password": password,
+                            "expires_ts": _expiry_in(text, m.end()), "comment": ""})
+    return entries
+
+
+def _comment_from(before: str, login: str, password: str) -> str:
+    """Комментарий («Shrd») — последняя содержательная строка ПЕРЕД блоком данных.
+    Учётку/пароль/ip/даты/заголовки пропускаем."""
+    for ln in reversed([l.strip() for l in before.splitlines()]):
+        if not ln:
+            continue
+        low = ln.lower()
+        if any(w in low for w in _PROXY_HEADER_WORDS):
+            continue
+        if RE_IPV4PORT.search(ln) or RE_DATE_EXP.search(ln) or RE_DAYS_EXP.search(ln):
+            continue
+        if login and ln == login:
+            continue
+        if password and ln == password:
+            continue
+        if re.fullmatch(r'[A-Za-zА-Яа-я0-9_\- ]{1,40}', ln):
+            return ln
+        break
+    return ""
+
+
+def _valid_host_port(host: str, port: int) -> bool:
+    if not (1 <= int(port) <= 65535):
+        return False
+    if host.count(".") == 3 and all(p.isdigit() and int(p) <= 255 for p in host.split(".")):
+        return True
+    return bool(re.fullmatch(r'[a-z0-9][a-z0-9.\-]{2,120}', host, re.I))
+
+
+def _expiry_in(text: str, from_pos: int) -> float | None:
+    """Дата окончания в тексте ПОСЛЕ позиции from_pos: дд.мм.гг[, чч:мм]
+    (приоритет) или «Nд» (дней от сейчас). None = не указано."""
+    window = text[from_pos:from_pos + 400]
+    m = RE_DATE_EXP.search(window)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000
+        hh = int(m.group(4) or 23)
+        mm = int(m.group(5) or 59)
+        try:
+            dt = datetime(y, mo, d, hh, mm)
+            return dt.timestamp()
+        except ValueError:
+            pass
+    m = RE_DAYS_EXP.search(window)
+    if m:
+        return now() + int(m.group(1)) * 86400
+    return None
+
+
+def proxy_url(row: dict) -> str:
+    """URL для телефона: socks5://login:pass@host:port (учётка url-энкодится)."""
+    auth = ""
+    if row.get("login"):
+        auth = quote(str(row["login"]), safe="") + ":" + quote(str(row.get("password") or ""), safe="") + "@"
+    return f"{row.get('scheme') or 'socks5'}://{auth}{row['host']}:{row['port']}"
+
+
+def db_proxy_add(entries: list, source: str = "dashboard") -> int:
+    added = 0
+    with DB_LOCK:
+        for e in entries:
+            try:
+                DB.execute(
+                    "INSERT OR IGNORE INTO proxies(scheme,host,port,login,password,"
+                    "expires_ts,comment,raw,added_ts,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (e.get("scheme") or "socks5", e["host"], int(e["port"]),
+                     e.get("login") or "", e.get("password") or "",
+                     e.get("expires_ts"), (e.get("comment") or "")[:60],
+                     (e.get("raw") or "")[:2000], now(), source))
+                added += DB.execute("SELECT changes()").fetchone()[0]
+            except Exception:
+                pass
+        DB.commit()
+    return added
+
+
+def db_proxy_list() -> list:
+    with DB_LOCK:
+        rows = DB.execute(
+            "SELECT id,scheme,host,port,login,password,expires_ts,comment,added_ts "
+            "FROM proxies ORDER BY id").fetchall()
+        assigns = dict(DB.execute(
+            "SELECT proxy_id, device_id FROM proxy_assign WHERE proxy_id IS NOT NULL").fetchall())
+    return [{"id": r[0], "scheme": r[1], "host": r[2], "port": r[3],
+             "login": r[4], "password": r[5], "expires_ts": r[6],
+             "comment": r[7], "added_ts": r[8],
+             "device_id": assigns.get(r[0])} for r in rows]
+
+
+def db_proxy_get(pid: int) -> dict | None:
+    with DB_LOCK:
+        r = DB.execute(
+            "SELECT id,scheme,host,port,login,password,expires_ts FROM proxies WHERE id=?",
+            (pid,)).fetchone()
+    if not r:
+        return None
+    return {"id": r[0], "scheme": r[1], "host": r[2], "port": r[3],
+            "login": r[4], "password": r[5], "expires_ts": r[6]}
+
+
+def db_proxy_delete(ids: list) -> int:
+    ids = [int(i) for i in ids]
+    n = 0
+    with DB_LOCK:
+        q = ",".join("?" * len(ids))
+        n = DB.execute(f"DELETE FROM proxies WHERE id IN ({q})", ids).rowcount
+        DB.execute(f"DELETE FROM proxy_assign WHERE proxy_id IN ({q})", ids)
+        DB.commit()
+    return max(n, 0)
+
+
+def db_proxy_clear() -> int:
+    with DB_LOCK:
+        n = DB.execute("DELETE FROM proxies").rowcount
+        DB.execute("DELETE FROM proxy_assign")
+        try:
+            DB.execute("DELETE FROM sqlite_sequence WHERE name='proxies'")
+        except Exception:
+            pass
+        DB.commit()
+    return max(n, 0)
+
+
+def db_proxy_assignment(device_id: str) -> tuple[int | None, dict | None]:
+    """(proxy_id, proxy_row) текущей привязки телефона; (None, None) если нет."""
+    with DB_LOCK:
+        r = DB.execute("SELECT proxy_id FROM proxy_assign WHERE device_id=?",
+                       (device_id,)).fetchone()
+    if not r or r[0] is None:
+        return None, None
+    return r[0], db_proxy_get(r[0])
+
+
+def db_proxy_assign(device_id: str, pid: int | None) -> list:
+    """Поменять привязку телефона. Возвращает список device_id, у которых
+    ОТНЯЛИ прокси (их надо уведомить proxy.set null)."""
+    displaced = []
+    with DB_LOCK:
+        if pid is not None:
+            prev = DB.execute("SELECT device_id FROM proxy_assign WHERE proxy_id=?",
+                              (pid,)).fetchone()
+            if prev and prev[0] != device_id:
+                displaced.append(prev[0])
+                DB.execute("DELETE FROM proxy_assign WHERE device_id=?", (prev[0],))
+        DB.execute("INSERT INTO proxy_assign(device_id,proxy_id,assigned_ts) VALUES(?,?,?) "
+                   "ON CONFLICT(device_id) DO UPDATE SET proxy_id=?, assigned_ts=?",
+                   (device_id, pid, now(), pid, now()))
+        DB.commit()
+    return displaced
+
+
+async def notify_proxy_change(device_id: str, pid: int | None, prow: dict | None):
+    """Отправить телефону proxy.set (онлайн — сразу, офлайн — ⏳ в отложенные)."""
+    payload = {"proxy": proxy_url(prow) if prow else None,
+               "proxy_id": pid, "source": "panel"}
+    d = devices.get(device_id)
+    if d and d.get("ws"):
+        await send_task(device_id, "proxy.set", payload)
+        log(f"[🌐] {device_id}: proxy.set отправлен ({prow and (str(prow['host']) + ':' + str(prow['port'])) or 'выключить'})")
+    else:
+        queue_pending([device_id], "proxy.set", payload)
+        log(f"[🌐] {device_id}: proxy.set отложен (офлайн)")
+
+
+@app.get("/api/proxy")
+async def api_proxy_get():
+    return {"proxies": db_proxy_list(), "now": now()}
+
+
+@app.post("/api/proxy/add")
+async def api_proxy_add(body: dict):
+    text = body.get("text") or ""
+    entries = parse_proxy_text(text)
+    for e in entries:
+        e["raw"] = text[:2000]
+    if not entries:
+        raise HTTPException(400, "прокси не распознаны — нужен блок с socks5://логин:пароль@ip:порт "
+                                 "(или IP:порт + логин/пароль строками)")
+    added = db_proxy_add(entries, source=body.get("source") or "dashboard")
+    return {"ok": True, "added": added,
+            "parsed": len(entries),
+            "note": "дубликаты (тот же ip:порт+логин) пропускаются" if added < len(entries) else ""}
+
+
+@app.post("/api/proxy/delete")
+async def api_proxy_delete(body: dict):
+    ids = body.get("ids") or []
+    if not ids:
+        raise HTTPException(400, "no ids")
+    return {"ok": True, "deleted": db_proxy_delete(ids)}
+
+
+@app.post("/api/proxy/clear")
+async def api_proxy_clear(body: dict):
+    if not body.get("confirm"):
+        raise HTTPException(400, "требуется confirm:true — удалит ВСЕ прокси и привязки")
+    n = db_proxy_clear()
+    log(f"[🌐] пул прокси очищен ({n}) — телефонам уйдёт proxy.set null при hello")
+    return {"ok": True, "deleted": n}
+
+
+@app.post("/api/proxy/distribute")
+async def api_proxy_distribute():
+    """🔗 Раздать свободные прокси телефонам без привязки (онлайн — сразу,
+    офлайн — ⏳). Ровно один прокси на телефон."""
+    proxies = [p for p in db_proxy_list() if not p.get("device_id")]
+    assigned_map = {p["device_id"] for p in db_proxy_list() if p.get("device_id")}
+    targets = [did for did in list(devices.keys())
+               if did not in assigned_map and not is_collector(did)]
+    done = []
+    for did in targets:
+        if not proxies:
+            break
+        p = proxies.pop(0)
+        db_proxy_assign(did, p["id"])
+        await notify_proxy_change(did, p["id"], p)
+        done.append({"device_id": did, "proxy_id": p["id"]})
+    log(f"[🌐] раздал {len(done)} прокси из свободных")
+    return {"ok": True, "assigned": done,
+            "note": ("свободные прокси кончились" if not proxies and done else "")}
+
+
+@app.post("/api/devices/{device_id}/proxy")
+async def api_device_proxy(device_id: str, body: dict):
+    """Привязать/снять прокси на телефоне: {"proxy_id": 12} или {"proxy_id": null}.
+    Неизвестному телефону — 404 (как у rescue). Если прокси уже у другого —
+    переезжает: старому телефону уйдёт proxy.set null."""
+    known = device_id in devices or device_id in known_devices()
+    if not known:
+        raise HTTPException(404, f"no_such {device_id} неизвестен (не онлайн и не в известных)")
+    pid = body.get("proxy_id")
+    if pid is not None:
+        try:
+            pid = int(pid)
+        except Exception:
+            raise HTTPException(400, "proxy_id должен быть числом или null")
+        prow = db_proxy_get(pid)
+        if not prow:
+            raise HTTPException(404, f"прокси #{pid} не найден")
+    else:
+        prow = None
+    for other in db_proxy_assign(device_id, pid):
+        await notify_proxy_change(other, None, None)
+    await notify_proxy_change(device_id, pid, prow)
+    return {"ok": True, "device_id": device_id, "proxy_id": pid,
+            "note": (f"прокси #{pid} → {device_id}" if pid else f"прокси снят с {device_id}")}
 
 
 # ============================================================

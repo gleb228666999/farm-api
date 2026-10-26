@@ -121,6 +121,14 @@
         bypass.run со свежим ключом (<24ч) отклоняется сразу (флаг даже
         не ставится, фарм не дёргается); force:true от владельца проходит
         мимо правила. Если ключа не было вовсе — байпас ДОЛЖЕН пройти.
+
+        🌐 ПРОКСИ (v0.27): задача proxy.set — вся сеть телефона через SOCKS5.
+        Поднимает локальный прозрачный форвардер (proxy_fwd.py,
+        SO_ORIGINAL_DST → SOCKS5 с авторизацией) и через iptables (su)
+        заворачивает в него ВЕСЬ исходящий TCP: Roblox/Delta/скрипты ходят
+        через прокси, а WebSокет к серверу фермы и локальные сети — мимо
+        (иначе потеряем телефон). UDP 443/80 режется — QUIC не утекает.
+        Статус — в info/proxy.json → heartbeat → панель.
 """
 import sys
 import os
@@ -129,6 +137,7 @@ import time
 import signal
 import hashlib
 import asyncio
+import socket
 import urllib.request
 import urllib.parse
 import subprocess
@@ -148,7 +157,7 @@ from core.process_manager import ProcessManager
 from core.apk_manager import run_apk_update, reboot_phone
 from core.events import EventOutbox
 
-VERSION = "0.26"
+VERSION = "0.27"
 HARVEST_HOLD_MINUTES = 30 * 24 * 60      # 🌾 v0.24: «бессрочное» окно сбора (30 дней) — снимается только harvest.stop
 BYPASS_MIN_KEY_AGE_H = 24.0              # 🔓 v0.26: байпас только если ключу ≥24ч (правило хозяина)
 RESCUE_CHECK_TIMEOUT = 20 * 60           # 🚑 v0.25: максимум ждём rega check (починка кук из пула)
@@ -698,6 +707,205 @@ def _task_service_start(payload: dict) -> dict:
     return PM.start(name)
 
 
+# ---------- 🌐 ПРОКСИ (v0.27): вся сеть телефона через SOCKS5 ----------
+
+PROXY_STATE_FILE = BASE / "info" / "proxy.json"
+PROXY_FWD_PORT = 8888
+PROXY_FWD_PIDFILE = BASE / "info" / "proxy_fwd.pid"
+PROXY_FWD_LOG = BASE / "logs" / "proxy_fwd.log"
+PROXY_CHAIN = "FARM_PROXY"      # имя iptables-цепочки
+PROXY_COMMENT = "farmproxy"     # комментарий правил в OUTPUT
+
+
+def get_proxy_state() -> dict:
+    """Статус прокси для heartbeat/панели (БЕЗ пароля)."""
+    try:
+        st = json.loads(PROXY_STATE_FILE.read_text())
+        return {"enabled": bool(st.get("enabled")),
+                "proxy_id": st.get("proxy_id"),
+                "host": st.get("host"), "port": st.get("port"),
+                "applied": bool(st.get("applied")),
+                "applied_ts": st.get("applied_ts"),
+                "error": (st.get("error") or "")[:120]}
+    except Exception:
+        return {"enabled": False, "proxy_id": None, "applied": False}
+
+
+def _proxy_su(cmd: str) -> tuple[bool, str]:
+    """Привилегированная команда (iptables/settings) через su. (ok, вывод)."""
+    try:
+        r = subprocess.run(["su", "-c", cmd], capture_output=True, text=True, timeout=25)
+        return (r.returncode == 0, ((r.stdout or "") + (r.stderr or "")).strip()[-400:])
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+def _proxy_state_write(st: dict):
+    try:
+        (BASE / "info").mkdir(parents=True, exist_ok=True)
+        tmp = PROXY_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(st))
+        tmp.replace(PROXY_STATE_FILE)               # атомарно
+    except Exception as e:
+        log(f"🌐 не смог записать proxy.json: {e}")
+
+
+def _proxy_stop() -> dict:
+    """Выключить всё прокси: убить форвардер, снять правила iptables,
+    сбросить системный http_proxy. Безопасно вызывать всегда."""
+    r = {"fwd_killed": False, "iptables_cleared": False}
+    try:
+        pid = int(PROXY_FWD_PIDFILE.read_text().strip())
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        r["fwd_killed"] = True
+    except Exception:
+        try:
+            subprocess.run(["pkill", "-f", "proxy_fwd.py"], capture_output=True, timeout=5)
+            r["fwd_killed"] = True
+        except Exception:
+            pass
+    ok = True
+    for cmd in (
+        f"iptables -t nat -D OUTPUT -p tcp -m comment --comment {PROXY_COMMENT} -j {PROXY_CHAIN}",
+        f"iptables -t nat -F {PROXY_CHAIN}; iptables -t nat -X {PROXY_CHAIN}",
+        f"iptables -D OUTPUT -p udp -m multiport --dports 443,80 "
+        f"-m comment --comment {PROXY_COMMENT} -j REJECT",
+        "settings put global http_proxy :0",
+    ):
+        okc, _ = _proxy_su(f"{cmd} 2>/dev/null; true")
+        ok = ok and okc
+    r["iptables_cleared"] = ok
+    return r
+
+
+def _proxy_ip_exclusions(host: str) -> list:
+    """Кому ходить НАПРЯМУЮ (не заворачивать в прокси): сам прокси, сервер
+    фермы, локальные/служебные сети. Иначе теряем связь с телефоном."""
+    ips = set()
+    for h in (host, urllib.parse.urlparse(CONFIG.get("server_url") or "").hostname):
+        if not h:
+            continue
+        try:
+            ips.add(socket.gethostbyname(h))
+        except Exception:
+            pass
+    if host.count(".") == 3:
+        ips.add(host)                              # на случай DNS-фиаско
+    return sorted(ips)
+
+
+def _proxy_iptables_cmds(excl_ips: list) -> list:
+    cmds = [f"iptables -t nat -N {PROXY_CHAIN} 2>/dev/null; iptables -t nat -F {PROXY_CHAIN}"]
+    for ip in excl_ips:
+        cmds.append(f"iptables -t nat -A {PROXY_CHAIN} -d {ip} -j RETURN")
+    for net in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255"):
+        cmds.append(f"iptables -t nat -A {PROXY_CHAIN} -d {net} -j RETURN")
+    cmds.append(f"iptables -t nat -A {PROXY_CHAIN} -p tcp -j REDIRECT --to-ports {PROXY_FWD_PORT}")
+    cmds.append(f"iptables -t nat -C OUTPUT -p tcp -m comment --comment {PROXY_COMMENT} "
+                f"-j {PROXY_CHAIN} || iptables -t nat -A OUTPUT -p tcp "
+                f"-m comment --comment {PROXY_COMMENT} -j {PROXY_CHAIN}")
+    # UDP 443/80 режем: QUIC не должен утекать мимо прокси — приложения
+    # сами откатятся на TCP (HTTP/2), который уже идёт через форвардер
+    cmds.append(f"iptables -C OUTPUT -p udp -m multiport --dports 443,80 "
+                f"-m comment --comment {PROXY_COMMENT} -j REJECT || "
+                f"iptables -A OUTPUT -p udp -m multiport --dports 443,80 "
+                f"-m comment --comment {PROXY_COMMENT} -j REJECT")
+    return cmds
+
+
+def task_proxy_set(payload: dict) -> dict:
+    """🌐 v0.27 ВКЛ/ВЫКЛ прокси (вся сеть через SOCKS5).
+    payload: {"proxy": "socks5://login:pass@ip:port"|null, "proxy_id": N}
+    1) глушим старое (форвардер + правила)  2) поднимаем proxy_fwd.py
+    3) iptables: весь OUTPUT TCP → 8888 (исключения: прокси, сервер, лок)
+    4) проверяем правило → честный вердикт → статус в info/proxy.json."""
+    url = payload.get("proxy")
+    proxy_id = payload.get("proxy_id")
+    src = str(payload.get("source") or "panel")
+    st = {"enabled": False, "applied": False, "proxy_id": proxy_id,
+          "host": None, "port": None, "applied_ts": None, "error": None}
+
+    log(f"🌐 proxy.set ({src}): {'включаю ' + url if url else 'выключаю прокси'}")
+    stop = _proxy_stop()
+    if not url:
+        _proxy_state_write({**st, "ts": time.time()})
+        return {"ok": True, "enabled": False,
+                "note": f"прокси снят (форвардер остановлен: {stop.get('fwd_killed')}; "
+                        f"правила сняты: {stop.get('iptables_cleared')})"}
+
+    u = urllib.parse.urlparse(str(url))
+    scheme = (u.scheme or "").lower()
+    if scheme not in ("socks5", "socks5h"):
+        st["error"] = f"схема {scheme}:// не поддерживается — нужен socks5 (у продавца выбирай SOCKS5)"
+        _proxy_state_write({**st, "ts": time.time()})
+        log(f"❌ {st['error']}")
+        return {"ok": False, "error": st["error"]}
+    host, port = u.hostname, u.port or 1080
+    if not host:
+        st["error"] = "в URL нет адреса прокси"
+        _proxy_state_write({**st, "ts": time.time()})
+        return {"ok": False, "error": st["error"]}
+    st.update({"host": host, "port": port})
+
+    # 1) поднимаем форвардер
+    try:
+        (BASE / "logs").mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [sys.executable, str(BASE / "proxy_fwd.py"),
+             "--listen", f"127.0.0.1:{PROXY_FWD_PORT}",
+             "--upstream", str(url),
+             "--log", str(PROXY_FWD_LOG), "--pidfile", str(PROXY_FWD_PIDFILE)],
+            env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except Exception as e:
+        st["error"] = f"форвардер не запустился: {e}"
+        _proxy_state_write({**st, "ts": time.time()})
+        return {"ok": False, "error": st["error"]}
+
+    alive = False
+    for _ in range(24):                       # ждём ≤6с пока порт откроется
+        try:
+            with socket.create_connection(("127.0.0.1", PROXY_FWD_PORT), timeout=0.5):
+                alive = True
+                break
+        except OSError:
+            time.sleep(0.25)
+    if not alive:
+        st["error"] = ("форвардер не поднял порт (см. logs/proxy_fwd.log; "
+                       "возможно неверный логин/пароль или адрес)")
+        _proxy_state_write({**st, "ts": time.time()})
+        return {"ok": False, "error": st["error"]}
+
+    # 2) iptables: весь OUTPUT TCP → локальный порт
+    excl = _proxy_ip_exclusions(host)
+    log(f"🌐 исключения (напрямую): {', '.join(excl) or '—'} + локальные сети")
+    fails = []
+    for cmd in _proxy_iptables_cmds(excl):
+        okc, out = _proxy_su(cmd)
+        if not okc:
+            fails.append(f"{cmd[:64]}… → {out[-120:]}")
+    if fails:
+        st["error"] = "iptables не применился (нет root/iptables?) — прокси НЕ включён: " + " | ".join(fails[:2])
+        _proxy_state_write({**st, "ts": time.time()})
+        log(f"❌ {st['error']}")
+        return {"ok": False, "error": st["error"]}
+
+    # 3) верификация: правило реально в OUTPUT?
+    okv, vout = _proxy_su(f"iptables -t nat -L OUTPUT -n --line-numbers | grep {PROXY_CHAIN}")
+    if not okv or PROXY_CHAIN not in vout:
+        st["error"] = f"правило не подтвердилось: {vout[:160]}"
+        _proxy_state_write({**st, "ts": time.time()})
+        return {"ok": False, "error": st["error"]}
+
+    st.update({"enabled": True, "applied": True, "applied_ts": time.time()})
+    _proxy_state_write({**st, "ts": time.time()})
+    log(f"✅ ПРОКСИ ВКЛЮЧЁН: вся сеть TCP → 127.0.0.1:{PROXY_FWD_PORT} → {host}:{port}")
+    return {"ok": True, "enabled": True, "applied": True,
+            "host": host, "port": port, "excluded": excl,
+            "note": "вся сеть телефона идёт через прокси (сервер фермы — напрямую)"}
+
+
 TASKS_SYNC = {
     "service.start":  _task_service_start,
     "service.stop":   _stop_service,
@@ -710,6 +918,7 @@ TASKS_SYNC = {
     "cookie.check":   task_cookie_check,
     "bypass.run":     task_bypass_run,
     "rescue.run":     task_rescue_run,       # 🚑 v0.25: спасение сломавшегося телефона
+    "proxy.set":      task_proxy_set,        # 🌐 v0.27: вся сеть через SOCKS5
 }
 
 
@@ -792,6 +1001,7 @@ async def heartbeat_loop(conn, interval):
             "battery": get_battery(),
             "uptime": round(time.time() - START),
             "farm": get_farm_state(),      # last_key_time → дашборд: возраст ключа 🔑
+            "proxy": get_proxy_state(),    # 🌐 v0.27: статус прокси → панель
         })
         await asyncio.sleep(interval)
 
@@ -866,7 +1076,7 @@ async def main():
                 "type": "hello",
                 "device_id": CONFIG["device_id"],
                 "client_version": VERSION,
-                "info": get_device_info(),
+                "info": {**get_device_info(), "proxy": get_proxy_state()},
             })
         except Exception as e:
             log(f"❌ Ошибка hello: {e}")

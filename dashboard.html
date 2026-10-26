@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>🚜 Farm Panel</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- ЕДИНАЯ ПАНЕЛЬ v1.6 — всё на одной странице, без отдельных меню.
+<!-- ЕДИНАЯ ПАНЕЛЬ v1.7 — всё на одной странице, без отдельных меню.
      Отдаётся FastAPI на :8000 → portmap :55019. Других адресов нет.
+     v1.7: 🌐 Прокси — вставка блока из бота, привязка к телефону, вся сеть через SOCKS5
      v1.6: правило байпаса поднято до «ключ ≥24ч»
      v1.5: 🚑 Спас (стоп петли рега↔фарм → куки из пула → фарм) + правило байпаса -->
 <style>
@@ -106,6 +107,26 @@ textarea{color:#9f9;width:100%;font-family:monospace;font-size:.85em;box-sizing:
 <span class="mut">отработанные куки удаляются сразу (архива нет)</span>
 </div>
 <div id="poolList" style="margin-top:6px;max-height:220px;overflow:auto"></div>
+</div>
+
+<div class="panel">
+<h2>🌐 Прокси <span class="mut" id="proxyCounts">—</span></h2>
+<textarea id="proxyText" rows="5" placeholder="вставь блок из бота целиком:
+  95.164.110.189:9176
+  V45FCw
+  tmr9H6
+  socks5://V45FCw:tmr9H6@95.164.110.189:9176
+  HTTPs / SOCKS5
+  02.11.26, 20:23
+  6д"></textarea>
+<div class="flex" style="margin-top:6px">
+<button class="b" onclick="proxyAdd()">➕ Добавить прокси</button>
+<button class="u" onclick="proxyDistribute()">🔗 Раздать свободные</button>
+<button class="g" onclick="loadProxy()">♻ Обновить</button>
+<button class="r" onclick="proxyClear()">🗑 Очистить все</button>
+<span class="mut">1 телефон = 1 прокси. Вся сеть телефона (TCP) идёт через SOCKS5; связь с сервером — напрямую. Работает по привязке: выбери телефон в строке прокси.</span>
+</div>
+<div id="proxyList" style="margin-top:6px;max-height:220px;overflow:auto"></div>
 </div>
 
 <div class="panel">
@@ -587,6 +608,91 @@ async function poolClear(){
   loadPool();
 }
 
+// ---------- 🌐 прокси (v1.7) ----------
+window._PROXY={proxies:[]};window._PROXYBYDEV={};
+function proxyById(id){return ((window._PROXY||{}).proxies||[]).find(p=>p.id===id)}
+async function loadProxy(){
+  try{
+    const j=await(await fetch('/api/proxy')).json();
+    window._PROXY=j;window._PROXYBYDEV={};
+    const nowS=j.now||Date.now()/1000;
+    (j.proxies||[]).forEach(p=>{if(p.device_id)window._PROXYBYDEV[p.device_id]=p;});
+    const free=(j.proxies||[]).filter(p=>!p.device_id).length;
+    $('proxyCounts').textContent='· всего: '+(j.proxies||[]).length+' (свободно '+free+')';
+    const devs=Object.keys(window._DEVINFO||{});
+    const row=(p)=>{
+      let exp='—';
+      if(p.expires_ts){const dl=Math.round((p.expires_ts-nowS)/86400);
+        exp=dl>=0?('⏳ '+dl+'д ('+new Date(p.expires_ts*1000).toLocaleDateString('ru')+','+new Date(p.expires_ts*1000).toLocaleTimeString('ru').slice(0,5)+')'):('❗ ИСТЁК '+new Date(p.expires_ts*1000).toLocaleDateString('ru'));}
+      const dv=p.device_id?((window._DEVINFO||{})[p.device_id]||{}):null;
+      const pr=dv&&dv.info&&dv.info.proxy;
+      const st=p.device_id
+        ?(pr&&pr.applied?'<span class="on">✓ работает</span>'
+          :(pr&&pr.error?'<span class="off">⚠ '+String(pr.error).slice(0,60)+'</span>'
+            :'<span class="mut">⏳ не подтверждён</span>'))
+        :'<span class="mut">свободен</span>';
+      const sel='<select onchange="proxyAssign('+p.id+',this.value)" style="max-width:130px">'
+        +'<option value="">— телефон —</option>'
+        +devs.map(d=>'<option value="'+d+'"'+(d===p.device_id?' selected':'')+'>'+d+'</option>').join('')+'</select>';
+      return '<div class="poolrow"><span class="mut">#'+p.id+'</span> <b>'+p.host+':'+p.port+'</b> '
+        +(p.login?'<span class="mut">('+p.login+')</span>':'')
+        +(p.comment?' <span class="gbadge">'+p.comment+'</span>':'')
+        +' <span class="mut">'+exp+'</span> '+sel+' '+st
+        +(p.device_id?' <button class="g" onclick="proxyUnassign('+p.id+')">✖ снять</button>':'')
+        +' <button class="r" onclick="proxyDel('+p.id+')">🗑</button></div>';
+    };
+    $('proxyList').innerHTML=((j.proxies||[]).map(row).join('')
+      ||' <span class="mut">пусто — вставь блок из бота выше</span>');
+  }catch(e){$('proxyCounts').textContent='сервер недоступен'}
+}
+async function proxyAdd(){
+  const text=$('proxyText').value.trim();
+  if(!text){show('❌ вставь блок из бота в поле выше');return}
+  const r=await fetch('/api/proxy/add',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text})});
+  const j=await r.json().catch(()=>({}));
+  show(r.ok?('🌐 добавлено '+j.added+' из '+j.parsed+(j.note?(' ('+j.note+')'):'')):'❌ '+(j.detail||await r.text()));
+  if(r.ok){$('proxyText').value='';loadProxy()}
+}
+async function proxyDel(id){
+  if(!confirm('🗑 Удалить прокси #'+id+'? (с привязки снимется автоматически)'))return;
+  await fetch('/api/proxy/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ids:[id]})});
+  loadProxy();
+}
+async function proxyClear(){
+  if(!confirm('🗑 Удалить ВСЕ прокси и привязки?'))return;
+  if(!confirm('ТОЧНО? Телефоны перейдут на прямой интернет (без прокси).'))return;
+  const r=await fetch('/api/proxy/clear',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({confirm:true})});
+  const j=await r.json().catch(()=>({}));
+  show(r.ok?'🗑 прокси удалены: '+j.deleted:'❌ '+(j.detail||await r.text()));
+  loadProxy();
+}
+async function proxyAssign(id,did){
+  if(!did)return;
+  const r=await fetch('/api/devices/'+encodeURIComponent(did)+'/proxy',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({proxy_id:id})});
+  const j=await r.json().catch(()=>({}));
+  show(r.ok?('🌐 '+j.note):('❌ '+(j.detail||'ошибка')));
+  loadProxy();
+}
+async function proxyUnassign(id){
+  const p=proxyById(id);if(!p||!p.device_id)return;
+  const r=await fetch('/api/devices/'+encodeURIComponent(p.device_id)+'/proxy',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({proxy_id:null})});
+  const j=await r.json().catch(()=>({}));
+  show(r.ok?('🌐 '+j.note):('❌ '+(j.detail||'ошибка')));
+  loadProxy();
+}
+async function proxyDistribute(){
+  if(!confirm('🔗 Раздать свободные прокси телефонам без прокси (1 телефон = 1 прокси)?'))return;
+  const r=await fetch('/api/proxy/distribute',{method:'POST'});
+  const j=await r.json().catch(()=>({}));
+  show(r.ok?('🔗 раздано: '+((j.assigned||[]).length)+(j.note?(' — '+j.note):'')):'❌ '+(j.detail||'ошибка'));
+  loadProxy();
+}
+
 // ---------- 📱 таблица устройств ----------
 function devRow(d){
   const bat=(d.info&&d.info.battery!=null)?d.info.battery:'?';
@@ -594,6 +700,10 @@ function devRow(d){
   const sel=selected===d.device_id?' class="sel"':'';
   const gb=(d.groups||[]).map(g=>'<span class="gbadge">👥'+g+'</span>').join('');
   const pend=(d.pending&&d.pending.length)?' <span class="pbadge" title="'+d.pending.join(', ')+'">⏳'+d.pending.length+'</span>':'';
+  const px=(window._PROXYBYDEV||{})[d.device_id];
+  const pxst=d.info&&d.info.proxy;
+  const pxb=px?' <span class="gbadge" style="background:'+(pxst&&pxst.applied?'#2a6':(pxst&&pxst.error?'#a33':'#c93'))
+    +'" title="прокси '+(pxst&&pxst.applied?'работает':(pxst&&pxst.error?('ошибка: '+pxst.error):'назначен, ждёт подтверждения'))+'">🌐'+px.host+':'+px.port+'</span>':'';
   const id=d.device_id;
   const q="'";
   const btns=[
@@ -624,7 +734,7 @@ function devRow(d){
     +'<td><input type="checkbox" class="chk" '+(checked.has(id)?'checked':'')
     +' onclick="event.stopPropagation()" onchange="chk(\''+id+'\',this.checked)"></td>'
     +'<td>'+id+(id.startsWith('collector-')?' <span class="gbadge">📦 сборщик</span>':'')
-    +' '+(d.online?'<span class="on">●</span>':'<span class="off">●</span>')+gb+pend+'</td>'
+    +' '+(d.online?'<span class="on">●</span>':'<span class="off">●</span>')+gb+pend+pxb+'</td>'
     +'<td>'+model+'</td><td>'+bat+'%</td><td>'+keyAge(d)+'</td><td>'+(d.client_version||'?')+'</td>'
     +'<td>'+(d.uptime_sec!=null?Math.round(d.uptime_sec/60)+'м':'—')+'</td>'
     +'<td>'+(d.last_seen_sec!=null?d.last_seen_sec+'с':'офлайн')+'</td>'
@@ -696,9 +806,10 @@ async function refresh(){
 }
 
 // ---------- автопollen ----------
-refresh();loadGroups();loadSched();loadPool();
+refresh();loadGroups();loadSched();loadPool();loadProxy();
 setInterval(refresh,3000);
 setInterval(loadGroups,15000);
 setInterval(loadSched,15000);
 setInterval(loadPool,20000);
+setInterval(loadProxy,20000);
 </script></body></html>
